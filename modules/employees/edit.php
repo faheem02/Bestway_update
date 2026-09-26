@@ -56,7 +56,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo->prepare("UPDATE employees SET user_id = ? WHERE id = ?")->execute([$uid, $id]);
         }
     } elseif ($employee_type === 'salesman' && !empty($emp['user_id'])) {
-        $pdo->prepare("UPDATE users SET role = 'salesman' WHERE id = ?")->execute([$emp['user_id']]);
+        $user_status = ($status == 1) ? 'Active' : 'Inactive';
+        $pdo->prepare("UPDATE users SET role = 'salesman', status = ? WHERE id = ?")->execute([$user_status, $emp['user_id']]);
+    }
+    if (!empty($emp['user_id'])) {
+        $user_status = ($status == 1) ? 'Active' : 'Inactive';
+        $pdo->prepare("UPDATE users SET status = ? WHERE id = ?")->execute([$user_status, $emp['user_id']]);
     }
 
     update('employees', [

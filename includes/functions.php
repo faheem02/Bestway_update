@@ -87,7 +87,7 @@ if (!function_exists('countRows')) {
 if (!function_exists('getActiveBookers')) {
     function getActiveBookers($pdo) {
         try {
-            return $pdo->query("SELECT id, full_name AS name, emp_code AS booker_code, commission_rate, area FROM employees WHERE employee_type = 'salesman' AND status = 1 ORDER BY full_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+            return $pdo->query("SELECT id, full_name AS name, emp_code AS booker_code, commission_rate, area FROM employees WHERE (employee_type = 'salesman' OR employee_type = 'order_booker') AND status = 1 ORDER BY full_name ASC")->fetchAll(PDO::FETCH_ASSOC);
         } catch (Exception $e) { return []; }
     }
 }

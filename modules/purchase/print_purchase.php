@@ -477,7 +477,7 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                     <th style="width:28px;">#</th>
                     <th>Item / Medicine Description</th>
                     <th style="width:65px;" class="text-center">Qty</th>
-                    <th style="width:110px;" class="text-center">Bonus & Disc</th>
+                    <th style="width:130px;" class="text-center">Bonus, Disc & Tax</th>
                     <th style="width:90px;" class="text-end">Cost/Rate</th>
                     <th style="width:90px;" class="text-end">TP Ref</th>
                     <th style="width:100px;" class="text-end">Total (Rs.)</th>
@@ -487,6 +487,7 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                 <?php $i = 1; foreach ($items as $item):
                     $bonus_pct = floatval($item['bonus_quantity']  ?? 0);
                     $disc_pct  = floatval($item['discount_percent'] ?? 0);
+                    $tax_p     = floatval($item['tax_percent']      ?? 0);
                     $disc_a    = floatval($item['discount_amount']  ?? 0);
                     $gross_row = $item['quantity'] * $item['purchase_price'];
                     $bonus_amt = $gross_row * ($bonus_pct / 100);
@@ -507,7 +508,10 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                         <?php if ($disc_pct > 0): ?>
                             <span class="disc-badge">Disc <?= number_format($disc_pct, 0) ?>%</span>
                         <?php endif; ?>
-                        <?php if ($bonus_pct == 0 && $disc_pct == 0): ?>
+                        <?php if ($tax_p > 0): ?>
+                            <span class="badge" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:5px;padding:1px 6px;font-size:0.68rem;font-weight:700;">GST <?= number_format($tax_p, 0) ?>%</span>
+                        <?php endif; ?>
+                        <?php if ($bonus_pct == 0 && $disc_pct == 0 && $tax_p == 0): ?>
                             <span class="text-muted" style="font-size:0.75rem;">—</span>
                         <?php endif; ?>
                     </td>

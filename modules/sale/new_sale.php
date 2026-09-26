@@ -38,20 +38,30 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
 if (isset($_GET['action']) && $_GET['action'] === 'search_customer') {
     header('Content-Type: application/json');
     $q = trim($_GET['q'] ?? '');
+    $area = trim($_GET['area'] ?? '');
     $res = [];
     if ($db_connected && $pdo) {
+        $where = ["status = 'Active'"];
+        $params = [];
+        if ($area !== '') {
+            $where[] = "LOWER(TRIM(area)) = LOWER(TRIM(:area))";
+            $params[':area'] = $area;
+        }
         if ($q === '') {
-            $stmt = $pdo->query("SELECT id, name, shop_name, phone, route_id, area, current_balance FROM customers WHERE status = 'Active' ORDER BY shop_name ASC, name ASC LIMIT 25");
+            $sql = "SELECT id, name, shop_name, phone, route_id, area, current_balance FROM customers WHERE " . implode(' AND ', $where) . " ORDER BY shop_name ASC, name ASC LIMIT 25";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
         } else {
             $term = "%{$q}%";
-            $stmt = $pdo->prepare("SELECT id, name, shop_name, phone, route_id, area, current_balance FROM customers WHERE status = 'Active' AND (shop_name LIKE :q1 OR name LIKE :q2 OR phone LIKE :q3) ORDER BY CASE WHEN shop_name LIKE :exact THEN 1 WHEN name LIKE :start_n THEN 2 ELSE 3 END, shop_name ASC LIMIT 25");
-            $stmt->execute([
-                ':q1'      => $term,
-                ':q2'      => $term,
-                ':q3'      => $term,
-                ':exact'   => "{$q}%",
-                ':start_n' => "{$q}%"
-            ]);
+            $where[] = "(shop_name LIKE :q1 OR name LIKE :q2 OR phone LIKE :q3)";
+            $params[':q1'] = $term;
+            $params[':q2'] = $term;
+            $params[':q3'] = $term;
+            $params[':exact'] = "{$q}%";
+            $params[':start_n'] = "{$q}%";
+            $sql = "SELECT id, name, shop_name, phone, route_id, area, current_balance FROM customers WHERE " . implode(' AND ', $where) . " ORDER BY CASE WHEN shop_name LIKE :exact THEN 1 WHEN name LIKE :start_n THEN 2 ELSE 3 END, shop_name ASC LIMIT 25";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
         }
         $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -122,7 +132,7 @@ if ($db_connected && $pdo) {
         sort($all_areas_combined, SORT_NATURAL | SORT_FLAG_CASE);
 
         // Salesmen covering areas
-        $salesmen_all = $pdo->query("SELECT id, full_name, area FROM employees WHERE employee_type = 'salesman' AND status = 1 ORDER BY full_name")->fetchAll(PDO::FETCH_ASSOC);
+        $salesmen_all = $pdo->query("SELECT id, full_name, area FROM employees WHERE (employee_type = 'salesman' OR employee_type = 'order_booker') AND status = 1 ORDER BY full_name")->fetchAll(PDO::FETCH_ASSOC);
         function salesmenForAreaBestway($salesmen_all, $areaName) {
             $area_l = strtolower(trim($areaName));
             $out = [];
@@ -405,9 +415,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $grand_total      = ($items_net - $order_discount_amount) + $round_off;
 
             $previous_balance = floatval($_POST['previous_balance'] ?? 0);
-            $net_payable      = $grand_total + $previous_balance;
+            $net_payable      = $grand_total;
             $paid_amount      = floatval($_POST['paid_amount'] ?? 0);
-            $balance_due      = $net_payable - $paid_amount;
+            $balance_due      = max(0, $grand_total - $paid_amount);
 
             // STEP 2: START TRANSACTIONS
             $conn->begin_transaction();
@@ -802,7 +812,6 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         <h4 class="font-weight-bold text-dark mb-1">
             <i class="fas fa-file-invoice-dollar text-primary mr-2"></i> Create Sales Invoice
         </h4>
-        <p class="text-muted small mb-0">Record customer sales invoice with live product search &amp; automated stock tracking</p>
     </div>
     <div>
         <a href="sales.php" class="btn btn-sm btn-outline-secondary font-weight-bold shadow-sm">
@@ -917,8 +926,8 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                     <?php endforeach; ?>
                 </div>
                 <div class="d-flex flex-wrap align-items-center">
-                    <a href="new_sale.php?direct=1" class="btn btn-sm btn-outline-primary font-weight-bold mr-2">
-                        <i class="fas fa-bolt mr-1"></i> Direct Invoice
+                    <a href="new_sale.php?area=<?= urlencode($view_area) ?>&direct=1" class="btn btn-sm btn-outline-primary font-weight-bold mr-2">
+                        <i class="fas fa-bolt mr-1"></i> Direct Invoice in this Area
                     </a>
                     <a href="../customer/customers.php" class="btn btn-sm btn-outline-success font-weight-bold">
                         <i class="fas fa-user-plus mr-1"></i> Add Customer
@@ -1061,13 +1070,30 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                         <div class="col-md-6 col-lg-4">
                             <label class="form-label font-weight-bold small mb-1">
                                 <i class="fas fa-user-tie text-primary mr-1"></i> Salesman
-                                <span class="text-muted font-weight-normal">(Commission credited)</span>
+                                <span id="salesmanAreaBadge" class="badge badge-light border text-primary ml-1 <?= !empty($view_area) ? '' : 'd-none' ?>">Area: <span id="salesmanAreaText"><?= htmlspecialchars($view_area) ?></span></span>
                             </label>
                             <select name="visible_booker_id" id="visibleSalesmanSelect" class="form-control font-weight-bold" onchange="syncVisibleSalesman(this)">
                                 <option value="">-- Direct / Office (No Salesman) --</option>
-                                <?php foreach ($bookers as $sb): ?>
+                                <?php 
+                                $filtered_bookers = $bookers;
+                                if (!empty($view_area)) {
+                                    $filtered_bookers = array_filter($bookers, function($b) use ($view_area) {
+                                        $parts = array_map('strtolower', array_map('trim', explode(',', $b['area'] ?? '')));
+                                        return in_array(strtolower(trim($view_area)), $parts, true);
+                                    });
+                                }
+                                ?>
+                                <?php if (!empty($view_area) && empty($filtered_bookers)): ?>
+                                    <option value="" disabled>-- No salesman allocated to <?= htmlspecialchars($view_area) ?> --</option>
+                                <?php endif; ?>
+                                <?php foreach ($filtered_bookers as $sb): ?>
                                     <?php 
                                     $is_sel = ($initial_booker_id && (int)$sb['id'] === (int)$initial_booker_id);
+                                    if (!$is_sel && count($filtered_bookers) === 1 && !empty($view_area)) {
+                                        $is_sel = true;
+                                        $initial_booker_id = (int)$sb['id'];
+                                        $initial_booker_name = $sb['name'];
+                                    }
                                     ?>
                                     <option value="<?= (int)$sb['id'] ?>" data-booker="<?= htmlspecialchars($sb['name']) ?>" data-areas="<?= htmlspecialchars($sb['area'] ?? '') ?>" <?= $is_sel ? 'selected' : '' ?>>
                                         <?= htmlspecialchars($sb['name']) ?><?= !empty($sb['commission_rate']) ? ' (' . rtrim(rtrim(number_format((float)$sb['commission_rate'], 2, '.', ''), '0'), '.') . '%)' : '' ?>
@@ -1093,7 +1119,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                                        name="customer_name"
                                        id="customerSearchInput"
                                        class="form-control font-weight-bold"
-                                       placeholder="Type shop name or customer to search..."
+                                       placeholder="<?= !empty($view_area) ? 'Search ' . htmlspecialchars($view_area) . ' customer / shop...' : 'Type shop name or customer to search...' ?>"
                                        autocomplete="off"
                                        value="<?= htmlspecialchars($preselected_customer ? ($preselected_customer['shop_name'] ?: $preselected_customer['name']) : '') ?>"
                                        required
@@ -1150,30 +1176,34 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                         <i class="fas fa-map-marked-alt text-info mr-1"></i> Area / Route
                         <span class="badge badge-light border text-muted ml-1" id="routeStatusBadge">Optional</span>
                     </label>
-                    <select name="route_id" id="routeSelect" class="form-control font-weight-bold">
+                    <select name="route_id" id="routeSelect" class="form-control font-weight-bold" onchange="onAreaRouteSelectChange(this)">
                         <option value="">-- Choose Area / Route (Optional) --</option>
-                        <?php if (!empty($routes)): ?>
-                            <optgroup label="Defined Routes">
-                                <?php foreach ($routes as $r): ?>
-                                    <option value="<?= $r['id'] ?>" 
-                                            data-route-name="<?= htmlspecialchars($r['name']) ?>">
-                                        <?= htmlspecialchars($r['name']) ?> (<?= htmlspecialchars($r['route_code']) ?>)
-                                    </option>
-                                <?php endforeach; ?>
-                            </optgroup>
-                        <?php endif; ?>
-                        <?php if (!empty($customer_areas)): ?>
-                            <optgroup label="Known Customer Areas">
-                                <?php foreach ($customer_areas as $ca): ?>
+                        <?php if (!empty($all_areas_combined)): ?>
+                            <optgroup label="Registered Areas">
+                                <?php foreach ($all_areas_combined as $ca): ?>
+                                    <?php $is_sel_area = (!empty($view_area) && strtolower(trim($ca)) === strtolower(trim($view_area))); ?>
                                     <option value="area_<?= htmlspecialchars($ca) ?>" 
-                                            data-route-name="<?= htmlspecialchars($ca) ?>">
+                                            data-route-name="<?= htmlspecialchars($ca) ?>"
+                                            <?= $is_sel_area ? 'selected' : '' ?>>
                                         <?= htmlspecialchars($ca) ?>
                                     </option>
                                 <?php endforeach; ?>
                             </optgroup>
                         <?php endif; ?>
+                        <?php if (!empty($routes)): ?>
+                            <optgroup label="Defined Routes">
+                                <?php foreach ($routes as $r): ?>
+                                    <?php $is_sel_r = (!empty($view_area) && strtolower(trim($r['name'])) === strtolower(trim($view_area))); ?>
+                                    <option value="<?= $r['id'] ?>" 
+                                            data-route-name="<?= htmlspecialchars($r['name']) ?>"
+                                            <?= $is_sel_r ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($r['name']) ?> (<?= htmlspecialchars($r['route_code']) ?>)
+                                    </option>
+                                <?php endforeach; ?>
+                            </optgroup>
+                        <?php endif; ?>
                     </select>
-                    <input type="hidden" name="route_name" id="routeNameInput" value="">
+                    <input type="hidden" name="route_name" id="routeNameInput" value="<?= htmlspecialchars($view_area) ?>">
                 </div>
 
                 <div class="col-md-6 mb-3">
@@ -1244,12 +1274,6 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 </table>
             </div>
         </div>
-
-        <div class="card-footer bg-white border-top py-2 d-flex justify-content-end">
-            <button type="button" class="btn btn-sm btn-outline-primary font-weight-bold" id="addRowBtn">
-                <i class="fas fa-plus mr-1"></i> Add Row
-            </button>
-        </div>
     </div>
 
     <!-- 3. Bottom Row: Summary & Notes (Left) + Calculation & Checkout (Right) -->
@@ -1317,9 +1341,10 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                             <input type="hidden" name="grand_total" id="currentBillInput" value="0.00">
                         </div>
 
-                        <div class="mb-2">
-                            <label class="small font-weight-bold text-warning mb-1">Previous Balance (Rs.):</label>
-                            <input type="number" step="0.01" name="previous_balance" id="previousBalanceInput" class="form-control form-control-sm text-right font-weight-bold text-warning" placeholder="0.00" value="" onfocus="this.select()">
+                        <div class="d-flex justify-content-between align-items-center mb-2 py-2 px-2 bg-light rounded border">
+                            <span class="small font-weight-bold text-muted"><i class="fas fa-wallet mr-1 text-info"></i> Current Balance:</span>
+                            <strong class="font-weight-bold text-danger font-monospace" id="summaryCustomerBalance">Rs. <?= $preselected_customer ? number_format((float)$preselected_customer['current_balance'], 2) : '0.00' ?></strong>
+                            <input type="hidden" name="previous_balance" id="previousBalanceInput" value="0.00">
                         </div>
 
                         <div class="d-flex justify-content-between align-items-center mb-2 pt-2 border-top">
@@ -1544,12 +1569,113 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
     }
 
     // ---------------------------------------------------------
-    // CUSTOMER LIVE SEARCH FUNCTIONALITY (open field with suggestions)
+    // CUSTOMER & SALESMAN AREA FILTERING FUNCTIONALITY
     // ---------------------------------------------------------
+    let currentActiveArea = <?= json_encode($view_area) ?> || '';
+    const allBookers = <?= json_encode($bookers) ?: '[]' ?>;
     const customersCatalog = <?= json_encode($customers) ?: '[]' ?>;
     let customerSearchTimer = null;
     let currentCustomerIdx  = -1;
     let selectedCustomer    = null;
+
+    function salesmanCoversArea(salesmanAreaStr, targetArea) {
+        if (!targetArea) return true;
+        if (!salesmanAreaStr) return false;
+        const target = targetArea.trim().toLowerCase();
+        const parts = salesmanAreaStr.toLowerCase().split(',').map(s => s.trim());
+        return parts.includes(target);
+    }
+
+    function filterSalesmenByArea(areaName) {
+        const sel = document.getElementById('visibleSalesmanSelect');
+        if (!sel) return;
+
+        const currentVal = sel.value;
+        sel.innerHTML = '';
+
+        // Always include Direct / Office
+        const defOpt = document.createElement('option');
+        defOpt.value = '';
+        defOpt.textContent = '-- Direct / Office (No Salesman) --';
+        sel.appendChild(defOpt);
+
+        const matchingBookers = allBookers.filter(b => salesmanCoversArea(b.area, areaName));
+
+        if (areaName && matchingBookers.length === 0) {
+            const noOpt = document.createElement('option');
+            noOpt.value = '';
+            noOpt.disabled = true;
+            noOpt.textContent = '-- No salesman allocated to ' + areaName + ' --';
+            sel.appendChild(noOpt);
+        }
+
+        matchingBookers.forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.id;
+            opt.setAttribute('data-booker', b.name);
+            opt.setAttribute('data-areas', b.area || '');
+            const comm = b.commission_rate && parseFloat(b.commission_rate) > 0 
+                ? ' (' + parseFloat(b.commission_rate).toString() + '%)' 
+                : '';
+            opt.textContent = b.name + comm;
+            sel.appendChild(opt);
+        });
+
+        // Retain current selection if valid in this area
+        const stillValid = matchingBookers.some(b => String(b.id) === String(currentVal));
+        if (stillValid) {
+            sel.value = currentVal;
+        } else {
+            if (matchingBookers.length === 1 && areaName) {
+                sel.value = String(matchingBookers[0].id);
+            } else {
+                sel.value = '';
+            }
+        }
+        syncVisibleSalesman(sel);
+
+        const badge = document.getElementById('salesmanAreaBadge');
+        const badgeText = document.getElementById('salesmanAreaText');
+        if (badge && badgeText) {
+            if (areaName) {
+                badgeText.textContent = areaName;
+                badge.classList.remove('d-none');
+            } else {
+                badge.classList.add('d-none');
+            }
+        }
+    }
+
+    function onAreaRouteSelectChange(selectEl) {
+        if (!selectEl) return;
+        const opt = selectEl.options[selectEl.selectedIndex];
+        const areaName = opt && selectEl.value ? (opt.getAttribute('data-route-name') || opt.text).trim() : '';
+
+        const rNameInput = document.getElementById('routeNameInput');
+        if (rNameInput) rNameInput.value = areaName;
+
+        currentActiveArea = areaName;
+
+        // Filter salesman dropdown
+        filterSalesmenByArea(currentActiveArea);
+
+        // If existing selected customer doesn't belong to newly chosen area, clear customer
+        if (selectedCustomer && currentActiveArea) {
+            const cArea = (selectedCustomer.area || '').trim().toLowerCase();
+            if (cArea !== currentActiveArea.toLowerCase()) {
+                clearCustomerSelection();
+            }
+        }
+
+        const custInput = document.getElementById('customerSearchInput');
+        if (custInput) {
+            custInput.placeholder = currentActiveArea 
+                ? 'Search ' + currentActiveArea + ' customer / shop...' 
+                : 'Type shop name or customer to search...';
+        }
+
+        selectEl.classList.remove('is-invalid');
+    }
 
     function onCustomerSearchFocus() {
         const input = document.getElementById('customerSearchInput');
@@ -1580,6 +1706,11 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
 
         const qLower = query.toLowerCase();
         const localMatches = customersCatalog.filter(c => {
+            // Strictly enforce Area filter when an area is active
+            if (currentActiveArea) {
+                const cArea = (c.area || '').trim().toLowerCase();
+                if (cArea !== currentActiveArea.toLowerCase()) return false;
+            }
             if (!query) return true;
             const shop = (c.shop_name || '');
             const name = (c.name || '');
@@ -1593,7 +1724,11 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
 
         clearTimeout(customerSearchTimer);
         customerSearchTimer = setTimeout(() => {
-            fetch('new_sale.php?action=search_customer&q=' + encodeURIComponent(query))
+            let url = 'new_sale.php?action=search_customer&q=' + encodeURIComponent(query);
+            if (currentActiveArea) {
+                url += '&area=' + encodeURIComponent(currentActiveArea);
+            }
+            fetch(url)
                 .then(r => r.json())
                 .then(data => {
                     if (Array.isArray(data)) {
@@ -1609,10 +1744,11 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         if (!list) return;
 
         if (!items || items.length === 0) {
+            const areaMsg = currentActiveArea ? ' in area "<strong>' + escapeHtml(currentActiveArea) + '</strong>"' : '';
             list.innerHTML = `
                 <div class="p-3 text-center text-muted small">
                     <i class="fas fa-exclamation-triangle text-warning mr-1"></i>
-                    No customer found matching "<strong>${escapeHtml(query)}</strong>"
+                    No customer found${areaMsg} matching "<strong>${escapeHtml(query)}</strong>"
                 </div>
             `;
             return;
@@ -1657,8 +1793,10 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         const bal = parseFloat(c.current_balance || 0);
         const balDisplay = document.getElementById('customerBalDisplay');
         if (balDisplay) balDisplay.textContent = 'Rs. ' + bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const summaryBal = document.getElementById('summaryCustomerBalance');
+        if (summaryBal) summaryBal.textContent = 'Rs. ' + bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         const prevBalInput = document.getElementById('previousBalanceInput');
-        if (prevBalInput) prevBalInput.value = bal > 0 ? bal.toFixed(2) : '';
+        if (prevBalInput) prevBalInput.value = '0.00';
 
         // Show customer Area badge
         const areaBadge = document.getElementById('customerAreaBadge');
@@ -1672,62 +1810,34 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
             }
         }
 
-        // Auto-select Area / Route if customer has one (by route_id or matching area name)
-        if (routeSelect) {
+        // Auto-select Area / Route if customer has one and routeSelect exists
+        const custArea = (c.area || '').trim();
+        const rSelect = document.getElementById('routeSelect');
+        const rNameInput = document.getElementById('routeNameInput');
+        if (custArea && rSelect) {
             let matched = false;
-            const prevCustOpt = routeSelect.querySelector('option[data-dyn-cust="1"]');
-            if (prevCustOpt) prevCustOpt.remove();
-
-            const custArea = (c.area || '').trim();
-            const custRouteId = c.route_id ? String(c.route_id) : '';
-
-            if (custRouteId && routeSelect.querySelector('option[value="' + custRouteId + '"]')) {
-                routeSelect.value = custRouteId;
-                matched = true;
-            } else if (custArea) {
-                const areaLower = custArea.toLowerCase();
-                for (let k = 0; k < routeSelect.options.length; k++) {
-                    const opt = routeSelect.options[k];
-                    const optName = (opt.getAttribute('data-route-name') || opt.text).trim().toLowerCase();
-                    if (optName === areaLower) {
-                        routeSelect.value = opt.value;
-                        matched = true;
-                        break;
-                    }
-                }
-                if (!matched) {
-                    const dynOpt = document.createElement('option');
-                    dynOpt.value = custRouteId ? custRouteId : 'area_' + custArea;
-                    dynOpt.setAttribute('data-route-name', custArea);
-                    dynOpt.setAttribute('data-dyn-cust', '1');
-                    dynOpt.textContent = custArea;
-                    dynOpt.selected = true;
-                    routeSelect.appendChild(dynOpt);
-                    routeSelect.value = dynOpt.value;
+            const areaLower = custArea.toLowerCase();
+            for (let k = 0; k < rSelect.options.length; k++) {
+                const opt = rSelect.options[k];
+                const optName = (opt.getAttribute('data-route-name') || opt.text).trim().toLowerCase();
+                if (optName === areaLower) {
+                    rSelect.value = opt.value;
                     matched = true;
+                    break;
                 }
             }
-
-            const picked = matched ? routeSelect.options[routeSelect.selectedIndex] : null;
-            const finalName = picked ? (picked.getAttribute('data-route-name') || picked.text) : (custArea || '');
-            if (routeNameInput) routeNameInput.value = finalName;
-        }
-
-        // Auto-select salesman for this customer's area if available
-        const visSalesman = document.getElementById('visibleSalesmanSelect');
-        if (visSalesman) {
-            const cAreaLower = (c.area || '').trim().toLowerCase();
-            if (cAreaLower) {
-                for (let si = 0; si < visSalesman.options.length; si++) {
-                    const opt = visSalesman.options[si];
-                    const optAreas = (opt.getAttribute('data-areas') || '').toLowerCase().split(',').map(s => s.trim());
-                    if (optAreas.includes(cAreaLower)) {
-                        visSalesman.selectedIndex = si;
-                        syncVisibleSalesman(visSalesman);
-                        break;
-                    }
-                }
+            if (!matched) {
+                const dynOpt = document.createElement('option');
+                dynOpt.value = 'area_' + custArea;
+                dynOpt.setAttribute('data-route-name', custArea);
+                dynOpt.setAttribute('data-dyn-cust', '1');
+                dynOpt.textContent = custArea;
+                rSelect.appendChild(dynOpt);
+                rSelect.value = dynOpt.value;
             }
+            if (rNameInput) rNameInput.value = custArea;
+            currentActiveArea = custArea;
+            filterSalesmenByArea(currentActiveArea);
         }
 
         const dd = document.getElementById('customerDropdown');
@@ -1756,19 +1866,27 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         if (clearBtn) clearBtn.classList.add('d-none');
         const balDisplay = document.getElementById('customerBalDisplay');
         if (balDisplay) balDisplay.textContent = 'Rs. 0.00';
+        const summaryBal = document.getElementById('summaryCustomerBalance');
+        if (summaryBal) summaryBal.textContent = 'Rs. 0.00';
         const prevBalInput = document.getElementById('previousBalanceInput');
-        if (prevBalInput) prevBalInput.value = '';
-        if (routeSelect) {
-            const dynOpt = routeSelect.querySelector('option[data-dyn-cust="1"]');
-            if (dynOpt) dynOpt.remove();
-            routeSelect.value = '';
+        if (prevBalInput) prevBalInput.value = '0.00';
+
+        const rSelect = document.getElementById('routeSelect');
+        const dynOpt = rSelect ? rSelect.querySelector('option[data-dyn-cust="1"]') : null;
+        if (dynOpt) {
+            dynOpt.remove();
+            rSelect.value = '';
+            const rNameInput = document.getElementById('routeNameInput');
+            if (rNameInput) rNameInput.value = '';
+            currentActiveArea = '';
+            filterSalesmenByArea('');
         }
-        if (routeNameInput) routeNameInput.value = '';
+
         const areaBadge = document.getElementById('customerAreaBadge');
         if (areaBadge) areaBadge.classList.add('d-none');
         const dd = document.getElementById('customerDropdown');
         if (dd) dd.classList.add('d-none');
-        if (input) input.focus();
+        recalculateAll();
     }
 
     function onCustomerSearchKeydown(e) {
@@ -2043,11 +2161,15 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
 
     if (routeSelect) {
         routeSelect.addEventListener('change', function () {
-            const opt = this.options[this.selectedIndex];
-            if (routeNameInput) {
-                routeNameInput.value = opt ? (opt.getAttribute('data-route-name') || '') : '';
-            }
+            onAreaRouteSelectChange(this);
         });
+        if (routeSelect.value && !currentActiveArea) {
+            const opt = routeSelect.options[routeSelect.selectedIndex];
+            currentActiveArea = opt ? (opt.getAttribute('data-route-name') || opt.text).trim() : '';
+        }
+    }
+    if (currentActiveArea) {
+        filterSalesmenByArea(currentActiveArea);
     }
 
     function onCustomerChange() {
@@ -2141,11 +2263,8 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         const dispBill = document.getElementById('dispCurrentBill');
         if (dispBill) dispBill.textContent = 'Rs. ' + currentBill.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-        // Previous Balance
-        const prevBalance = parseFloat(document.getElementById('previousBalanceInput').value) || 0;
-
-        // Net Payable
-        const netPayable = currentBill + prevBalance;
+        // Net Payable (Equal to Current Bill — Previous balance is not added to invoice)
+        const netPayable = currentBill;
         const netPayInput = document.getElementById('netPayableInput');
         if (netPayInput) netPayInput.value = netPayable.toFixed(2);
         const dispNet = document.getElementById('dispNetPayable');
@@ -2153,7 +2272,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
 
         // Paid Amount & Balance Due
         const paidAmount = parseFloat(document.getElementById('paidAmountInput').value) || 0;
-        const balanceDue = netPayable - paidAmount;
+        const balanceDue = Math.max(0, netPayable - paidAmount);
         const balDueInput = document.getElementById('balanceDueInput');
         if (balDueInput) balDueInput.value = balanceDue.toFixed(2);
         const dispBal = document.getElementById('dispBalanceDue');
@@ -2163,7 +2282,6 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
     // Realtime listeners
     itemsBody.addEventListener('input', recalculateAll);
     document.getElementById('orderDiscount').addEventListener('input', recalculateAll);
-    document.getElementById('previousBalanceInput').addEventListener('input', recalculateAll);
     document.getElementById('paidAmountInput').addEventListener('input', recalculateAll);
     document.getElementById('roundOffValue').addEventListener('input', function() {
         document.getElementById('roundOffCheck').checked = false;
@@ -2173,19 +2291,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
 
 
 
-    if (routeSelect) {
-        routeSelect.addEventListener('change', function () {
-            const selected = this.options[this.selectedIndex];
-            if (selected && this.value) {
-                this.classList.remove('is-invalid');
-                if (routeNameInput) {
-                    routeNameInput.value = selected.getAttribute('data-route-name') || selected.text;
-                }
-            } else {
-                if (routeNameInput) routeNameInput.value = '';
-            }
-        });
-    }
+
 
     // Form handlers and initialization only when saleForm is present
     const form = document.getElementById('saleForm');

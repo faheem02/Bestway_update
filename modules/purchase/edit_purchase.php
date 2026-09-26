@@ -124,8 +124,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     INSERT INTO purchase_items (
                         purchase_id, product_id, batch_no, expiry_date,
                         quantity, bonus_quantity, purchase_price, trade_price,
-                        retail_price, discount_percent, discount_amount, total_price
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        retail_price, discount_percent, discount_amount, tax_percent, tax_amount, total_price
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
 
                 $stmt_add_stock = $pdo->prepare("
@@ -152,21 +152,27 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     $tp_rate     = floatval($itm['trade_price'] ?? 0);
                     $disc_pct    = floatval($itm['discount_percent'] ?? 0);
                     $disc_amt    = floatval($itm['discount_amount'] ?? 0);
+                    $tax_pct     = floatval($itm['tax_percent'] ?? 0);
+                    $tax_amt     = floatval($itm['tax_amount'] ?? 0);
                     $gross_row   = $raw_qty * $p_cost;
-                    $row_total   = floatval($itm['total_price'] ?? max(0, $gross_row - $disc_amt));
+                    $net_bef_tax = max(0, $gross_row - $disc_amt);
+                    if ($tax_amt <= 0 && $tax_pct > 0) {
+                        $tax_amt = round($net_bef_tax * ($tax_pct / 100), 2);
+                    }
+                    $row_total   = floatval($itm['total_price'] ?? max(0, $net_bef_tax + $tax_amt));
 
                     // Distribute overall bill discount proportionally
                     $bill_disc_ratio = ($subtotal > 0 && $discount_amount > 0) ? min(1, $discount_amount / $subtotal) : 0;
                     $row_net_after_bill_disc = max(0, $row_total * (1 - $bill_disc_ratio));
 
-                    // Net effective unit cost after BOTH discounts (Row discount + Bill discount)
+                    // Net effective unit cost after BOTH discounts and GST
                     $net_unit_cost = ($raw_qty > 0) ? ($row_net_after_bill_disc / $raw_qty) : $p_cost;
 
                     if ($pid > 0 && ($final_qty > 0 || $final_bonus > 0)) {
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
                             $final_qty, $final_bonus, $net_unit_cost, $tp_rate,
-                            $tp_rate, $disc_pct, $disc_amt, $row_total
+                            $tp_rate, $disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
                         $stmt_add_stock->execute([$total_stock, $base_pack_cost, $base_pack_tp, $pid]);
@@ -320,6 +326,7 @@ $products  = $pdo->query("
                             <th style="width: 110px;" class="text-right">TP Ref</th>
                             <th style="width: 85px;" class="text-center">Bonus (Pcs)</th>
                             <th style="width: 85px;" class="text-center">Disc %</th>
+                            <th style="width: 85px;" class="text-center">GST %</th>
                             <th style="width: 125px;" class="text-right">Total (Rs.)</th>
                             <th style="width: 45px;" class="text-center"></th>
                         </tr>
@@ -329,12 +336,6 @@ $products  = $pdo->query("
                     </tbody>
                 </table>
             </div>
-        </div>
-
-        <div class="card-footer bg-white border-top py-2 d-flex justify-content-end">
-            <button type="button" class="btn btn-sm btn-outline-primary font-weight-bold" onclick="addEditRow()">
-                <i class="fas fa-plus mr-1"></i> Add Row
-            </button>
         </div>
     </div>
 
@@ -381,9 +382,10 @@ $products  = $pdo->query("
                             <label class="small font-weight-bold text-muted mb-0">Discount (Rs.):</label>
                             <input type="number" step="0.01" name="discount_amount" id="editDiscount" class="form-control form-control-sm text-right font-weight-bold" placeholder="0.00" value="<?= $purchase['discount_amount'] > 0 ? $purchase['discount_amount'] : '' ?>" onfocus="this.select()" oninput="recalcEditTotals()">
                         </div>
-                        <div class="mb-2">
-                            <label class="small font-weight-bold text-primary mb-0">GST / Sales Tax (Rs.):</label>
-                            <input type="number" step="0.01" name="tax_amount" id="editTax" class="form-control form-control-sm text-right font-weight-bold text-primary" placeholder="0.00" value="<?= ($purchase['tax_amount'] ?? 0) > 0 ? $purchase['tax_amount'] : '' ?>" onfocus="this.select()" oninput="recalcEditTotals()">
+                        <div class="d-flex justify-content-between mb-2">
+                            <span class="text-muted small">Total Items GST:</span>
+                            <strong id="dispTax" class="font-weight-bold text-primary">Rs. <?= number_format($purchase['tax_amount'] ?? 0, 2) ?></strong>
+                            <input type="hidden" name="tax_amount" id="editTax" value="<?= $purchase['tax_amount'] ?? 0 ?>">
                         </div>
                         <div class="mb-2">
                             <label class="small font-weight-bold text-muted mb-0">Freight (Rs.):</label>
@@ -453,6 +455,7 @@ function addEditRow(itemData = null) {
     const cost        = (itemData && parseFloat(itemData.purchase_price) > 0) ? parseFloat(itemData.purchase_price).toFixed(2) : '';
     const tp          = (itemData && parseFloat(itemData.trade_price) > 0) ? parseFloat(itemData.trade_price).toFixed(2) : '';
     const discPct     = (itemData && parseFloat(itemData.discount_percent) > 0) ? parseFloat(itemData.discount_percent).toFixed(2) : '';
+    const gstPct      = (itemData && parseFloat(itemData.tax_percent) > 0) ? parseFloat(itemData.tax_percent).toFixed(2) : '';
     const total       = (itemData && parseFloat(itemData.total_price) > 0) ? parseFloat(itemData.total_price).toFixed(2) : '';
     const pbox        = itemData ? (itemData.packs_per_box || 1) : 1;
     const selectedUnit = itemData ? (itemData.unit_type || itemData.stock_unit || 'Pack') : 'Pack';
@@ -494,6 +497,10 @@ function addEditRow(itemData = null) {
         <td>
             <input type="number" step="0.01" min="0" max="100" name="items[${editCounter}][discount_percent]" id="edisc_${editCounter}" class="form-control form-control-sm text-center" value="${discPct}" placeholder="0.00" onfocus="this.select()" oninput="calcEditRow(${editCounter})">
             <input type="hidden" name="items[${editCounter}][discount_amount]" id="ediscAmt_${editCounter}" value="0.00">
+        </td>
+        <td>
+            <input type="number" step="0.01" min="0" max="100" name="items[${editCounter}][tax_percent]" id="egst_${editCounter}" class="form-control form-control-sm text-center text-primary fw-bold" value="${gstPct}" placeholder="0.00" onfocus="this.select()" oninput="calcEditRow(${editCounter})">
+            <input type="hidden" name="items[${editCounter}][tax_amount]" id="etaxAmt_${editCounter}" value="0.00">
         </td>
         <td>
             <input type="number" step="0.01" readonly name="items[${editCounter}][total_price]" id="erowTot_${editCounter}" class="form-control form-control-sm text-end font-monospace fw-bold bg-success-subtle" value="${total}" placeholder="0.00">
@@ -551,9 +558,14 @@ function calcEditRow(rowId) {
     const bonusAmt = parseFloat((gross * (bonusPct / 100)).toFixed(2));
     const dAmt     = parseFloat((gross * (discPct  / 100)).toFixed(2));
     const totalRed = parseFloat((bonusAmt + dAmt).toFixed(2));
-    const net      = Math.max(0, parseFloat((gross - totalRed).toFixed(2)));
+    const netBefTax = Math.max(0, parseFloat((gross - totalRed).toFixed(2)));
+    const gstPct   = parseFloat(document.getElementById('egst_' + rowId)?.value) || 0;
+    const taxAmt   = parseFloat((netBefTax * (gstPct / 100)).toFixed(2));
+    const net      = Math.max(0, parseFloat((netBefTax + taxAmt).toFixed(2)));
 
     discAmtEl.value = totalRed.toFixed(2);
+    const taxAmtEl = document.getElementById('etaxAmt_' + rowId);
+    if (taxAmtEl) taxAmtEl.value = taxAmt.toFixed(2);
     totalEl.value   = net.toFixed(2);
 
     const discDisplay = document.getElementById('ediscDisplay_' + rowId);
@@ -561,6 +573,7 @@ function calcEditRow(rowId) {
         const parts = [];
         if (bonusAmt > 0) parts.push(`<span class="text-primary">Bonus: -${bonusAmt.toFixed(2)}</span>`);
         if (dAmt > 0)     parts.push(`<span class="text-success">Disc: -${dAmt.toFixed(2)}</span>`);
+        if (taxAmt > 0)   parts.push(`<span class="text-primary font-weight-bold">GST: +${taxAmt.toFixed(2)}</span>`);
         discDisplay.innerHTML = parts.join(' ');
     }
 
@@ -578,20 +591,26 @@ function removeEditRow(rowId) {
 function recalcEditTotals() {
     const rows = document.querySelectorAll('#editItemsBody tr');
     let subtotal = 0;
+    let totalTax = 0;
 
     rows.forEach(tr => {
         const rowId = tr.id.replace('erow_', '');
-        subtotal += parseFloat(document.getElementById('erowTot_' + rowId).value) || 0;
+        subtotal += parseFloat(document.getElementById('erowTot_' + rowId)?.value) || 0;
+        totalTax += parseFloat(document.getElementById('etaxAmt_' + rowId)?.value) || 0;
     });
 
     const disc = parseFloat(document.getElementById('editDiscount').value) || 0;
-    const tax = parseFloat(document.getElementById('editTax').value) || 0;
     const freight = parseFloat(document.getElementById('editFreight').value) || 0;
-    const grand = Math.max(0, (subtotal - disc) + tax + freight);
+    const grand = Math.max(0, (subtotal - disc) + freight);
     const paid = parseFloat(document.getElementById('editPaid').value) || 0;
     const bal = Math.max(0, grand - paid);
 
     document.getElementById('dispSubtotal').textContent = 'Rs. ' + subtotal.toFixed(2);
+    const dispTaxEl = document.getElementById('dispTax');
+    if (dispTaxEl) dispTaxEl.textContent = 'Rs. ' + totalTax.toFixed(2);
+    const editTaxEl = document.getElementById('editTax');
+    if (editTaxEl) editTaxEl.value = totalTax.toFixed(2);
+
     document.getElementById('dispGrandTotal').textContent = 'Rs. ' + grand.toFixed(2);
     document.getElementById('dispBalance').textContent = 'Rs. ' + bal.toFixed(2);
 

@@ -2,7 +2,8 @@
 /**
  * Bestway Wholesale Distribution - View Sale Invoice Details
  */
-$page_title = "Sales Invoice Details";
+$page_title = "Sale Invoice Details";
+$compact_page_heading = true;
 require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/header.php';
@@ -25,7 +26,7 @@ if ($id <= 0) {
 
 // Fetch invoice details
 $stmt = $conn->prepare("
-    SELECT si.*, c.invoice_type AS customer_invoice_type, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type 
+    SELECT si.*, c.invoice_type AS customer_invoice_type, c.license_number, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type 
     FROM sales_invoices si
     LEFT JOIN customers c ON (c.id = si.customer_id OR (si.customer_id IS NULL AND (c.name = si.customer_name OR c.shop_name = si.customer_name)))
     LEFT JOIN employees e ON e.id = si.booker_id
@@ -36,6 +37,16 @@ $stmt->execute();
 $inv_res = $stmt->get_result();
 $invoice = $inv_res->fetch_assoc();
 $stmt->close();
+
+$cust_lic = trim($invoice['license_number'] ?? '');
+if (empty($cust_lic) && !empty($invoice['customer_name']) && $db_connected && $pdo) {
+    try {
+        $cname = trim($invoice['customer_name']);
+        $chk = $pdo->prepare("SELECT license_number FROM customers WHERE name = ? OR shop_name = ? LIMIT 1");
+        $chk->execute([$cname, $cname]);
+        $cust_lic = trim($chk->fetchColumn() ?: '');
+    } catch (Exception $e) {}
+}
 
 if (!$invoice) {
     echo "<div class='alert alert-danger m-4'>Sales Invoice record not found. <a href='sales.php'>Go Back</a></div>";
@@ -66,9 +77,9 @@ if ($db_connected && $pdo) {
 // Calculate totals
 $grand = floatval($invoice['grand_total']);
 $paid  = floatval($invoice['paid_amount']);
-$bal   = floatval($invoice['balance_due']);
+$inv_balance = max(0, $grand - $paid);
 
-if ($bal <= 0.01) {
+if ($inv_balance <= 0.01) {
     $status_badge = '<span class="badge bg-success px-3 py-2 fs-6"><i class="fa-solid fa-check-circle me-1"></i> Paid in Full</span>';
 } elseif ($paid > 0) {
     $status_badge = '<span class="badge bg-warning text-dark px-3 py-2 fs-6"><i class="fa-solid fa-clock me-1"></i> Partially Paid</span>';
@@ -127,27 +138,27 @@ if ($bal <= 0.01) {
 </style>
 
 <!-- Top Toolbar -->
-<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-    <div class="d-flex align-items-center gap-3">
-        <a href="sales.php" class="btn btn-outline-secondary bg-white rounded-3">
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+    <div class="d-flex align-items-center gap-2">
+        <a href="sales.php" class="btn btn-sm btn-outline-secondary bg-white rounded-3 shadow-sm">
             <i class="fa-solid fa-arrow-left me-1"></i> Back to Sales
         </a>
-        <div>
-            <h4 class="fw-bold mb-0 text-dark">Invoice #<?= htmlspecialchars($invoice['invoice_no']) ?></h4>
-            <span class="text-muted small">Recorded on <?= date('d M Y', strtotime($invoice['invoice_date'])) ?></span>
-        </div>
+        <span class="badge bg-primary text-white font-monospace px-3 py-2" style="font-size:0.95rem;">
+            <?= htmlspecialchars($invoice['invoice_no']) ?>
+        </span>
+        <span class="text-muted small">Recorded: <?= date('d M Y', strtotime($invoice['invoice_date'])) ?></span>
     </div>
     <div class="d-flex flex-wrap gap-2">
         <?php
             $v_print_type = (!empty($invoice['customer_invoice_type']) && $invoice['customer_invoice_type'] === 'warranty') ? 'warranty' : 'sale';
         ?>
-        <a href="print_invoice.php?id=<?= $invoice['id'] ?>&type=<?= $v_print_type ?>" target="_blank" class="btn btn-primary fw-semibold shadow-sm px-3 rounded-3">
+        <a href="print_invoice.php?id=<?= $invoice['id'] ?>&type=<?= $v_print_type ?>" target="_blank" class="btn btn-sm btn-primary fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-print me-1"></i> Print Invoice
         </a>
-        <a href="edit_sale.php?id=<?= $invoice['id'] ?>" class="btn btn-outline-warning text-dark bg-white fw-semibold shadow-sm px-3 rounded-3">
+        <a href="edit_sale.php?id=<?= $invoice['id'] ?>" class="btn btn-sm btn-outline-warning text-dark bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-edit me-1"></i> Edit
         </a>
-        <a href="sale_return.php?invoice_id=<?= $invoice['id'] ?>" class="btn btn-outline-danger bg-white fw-semibold shadow-sm px-3 rounded-3">
+        <a href="sale_return.php?invoice_id=<?= $invoice['id'] ?>" class="btn btn-sm btn-outline-danger bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-undo me-1"></i> Return Items
         </a>
     </div>
@@ -162,7 +173,13 @@ if ($bal <= 0.01) {
                 <?= htmlspecialchars($invoice['invoice_no']) ?>
             </span>
             <h3 class="fw-bold text-dark mb-1"><?= htmlspecialchars($invoice['customer_name']) ?></h3>
-            
+            <?php if (!empty($cust_lic)): ?>
+                <div class="mt-2">
+                    <span class="badge badge-light border text-dark font-weight-bold py-1 px-2 shadow-sm" style="font-size: 0.85rem;">
+                        <i class="fas fa-id-card text-success mr-1"></i> Drug Lic #: <span class="text-primary font-monospace"><?= htmlspecialchars($cust_lic) ?></span>
+                    </span>
+                </div>
+            <?php endif; ?>
         </div>
         <div class="col-md-6 text-md-end">
             <div class="mb-2"><?= $status_badge ?></div>
@@ -192,7 +209,6 @@ if ($bal <= 0.01) {
                         <i class="fa-solid fa-book-open me-1"></i> View Month Ledger
                     </a>
                 </div>
-                <small class="text-muted d-block mt-1">Har sale ka commission salesman ke monthly salary balance me automatically add hota rehta hai.</small>
             <?php else: ?>
                 <small class="text-muted">Assigned Sales Officer</small>
             <?php endif; ?>
@@ -276,23 +292,13 @@ if ($bal <= 0.01) {
                     <span class="fw-bold text-dark fs-6">Current Bill Total:</span>
                     <span class="fw-bold text-primary fs-6 font-monospace">Rs. <?= number_format($invoice['grand_total'], 2) ?></span>
                 </div>
-                <?php if (floatval($invoice['previous_balance']) > 0): ?>
-                    <div class="financial-row">
-                        <span class="text-warning-emphasis fw-semibold">Previous Balance:</span>
-                        <span class="fw-bold text-warning-emphasis font-monospace">+ Rs. <?= number_format($invoice['previous_balance'], 2) ?></span>
-                    </div>
-                    <div class="financial-row pt-1 border-top">
-                        <span class="fw-bold text-dark">Total Net Payable:</span>
-                        <span class="fw-bold text-dark font-monospace">Rs. <?= number_format($invoice['net_payable'], 2) ?></span>
-                    </div>
-                <?php endif; ?>
                 <div class="financial-row pt-2 border-top">
                     <span class="text-success fw-bold">Amount Paid:</span>
                     <span class="fw-bold text-success font-monospace">Rs. <?= number_format($invoice['paid_amount'], 2) ?></span>
                 </div>
                 <div class="financial-row pt-2 border-top border-2">
-                    <span class="text-danger fw-bold fs-6">Balance Due:</span>
-                    <span class="fw-bold text-danger fs-5 font-monospace">Rs. <?= number_format($invoice['balance_due'], 2) ?></span>
+                    <span class="text-danger fw-bold fs-6">Invoice Balance:</span>
+                    <span class="fw-bold text-danger fs-5 font-monospace">Rs. <?= number_format($inv_balance, 2) ?></span>
                 </div>
             </div>
         </div>

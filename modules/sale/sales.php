@@ -2,7 +2,8 @@
 /**
  * Bestway Wholesale Distribution - View All Sales Invoices
  */
-$page_title = "Sales History & Invoices";
+$page_title = "Sale Invoices";
+$compact_page_heading = true;
 require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/header.php';
@@ -291,24 +292,18 @@ if ($db_connected && $pdo) {
     }
 </style>
 
-<!-- Top Title Bar -->
-<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-    <div class="d-flex align-items-center gap-3">
-        <div class="page-title-badge">
-            <i class="fa-solid fa-receipt"></i>
-        </div>
-        <div>
-            <h4 class="fw-bold mb-0 text-dark">Sales History & Invoices</h4>
-            <p class="text-muted small mb-0">B2B Wholesale customer billing, delivery dispatches & payment tracking</p>
-        </div>
-    </div>
-    <div class="d-flex gap-2">
+<!-- Top Action Bar -->
+<div class="d-flex justify-content-end align-items-center mb-3">
+    <div class="d-flex flex-wrap gap-2">
+        <a href="print_sales.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white fw-semibold shadow-sm px-3 rounded-3">
+            <i class="fa-solid fa-print me-1"></i> Print Invoices
+        </a>
         <?php if (isAdmin()): ?>
-        <a href="order_booker_invoices.php" class="btn btn-outline-info fw-semibold shadow-sm px-3 rounded-3" title="Salesman Invoices & Profit">
+        <a href="order_booker_invoices.php" class="btn btn-sm btn-outline-info fw-semibold shadow-sm px-3 rounded-3" title="Salesman Invoices & Profit">
             <i class="fa-solid fa-user-tag me-1"></i> Salesman Invoices
         </a>
         <?php endif; ?>
-        <a href="new_sale.php" class="btn btn-primary fw-semibold shadow-sm px-3 rounded-3">
+        <a href="new_sale.php" class="btn btn-sm btn-primary fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-plus me-1"></i> Create New Sale
         </a>
     </div>
@@ -424,6 +419,9 @@ if ($db_connected && $pdo) {
             <button type="submit" class="btn btn-sm btn-primary fw-semibold px-3 flex-grow-1">
                 <i class="fa-solid fa-filter me-1"></i> Filter
             </button>
+            <a href="print_sales.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white px-3 shadow-sm" title="Print Filtered Invoices">
+                <i class="fa-solid fa-print"></i>
+            </a>
             <a href="sales.php" class="btn btn-sm btn-outline-secondary px-3" title="Reset Filters">
                 <i class="fa-solid fa-undo"></i>
             </a>
