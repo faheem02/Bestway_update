@@ -3,7 +3,8 @@
  * Bestway Distribution - Enterprise Product Catalog & Inventory List
  * Multi-Unit B2B Wholesale Inventory Management
  */
-$page_title = "Product Catalog & Inventory";
+$page_title = "Products";
+$compact_page_heading = true;
 require_once __DIR__ . '/../../includes/header.php';
 
 // Handle Inline Delete Action
@@ -312,25 +313,29 @@ if ($db_connected && $pdo) {
     .action-btn.btn-delete:hover i {
         color: #ffffff !important;
     }
+    @media print {
+        .page-title-badge, .filter-card, .btn, .sidebar, .topbar, #sidebarWrapper, .pagination, .action-btn, th:last-child, td:last-child {
+            display: none !important;
+        }
+        body, .content, #content-wrapper {
+            background: #fff !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+    }
 </style>
 
-<!-- Top Title & Quick Actions -->
-<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-    <div class="d-flex align-items-center gap-3">
-        <div class="page-title-badge">
-            <i class="fa-solid fa-boxes"></i>
-        </div>
-        <div>
-            <h4 class="fw-bold mb-0 text-dark">View Product List</h4>
-            <p class="text-muted small mb-0">Complete list of wholesale medicines, packaging conversion, TP rates & stocks</p>
-        </div>
-    </div>
-    <div class="d-flex gap-2">
-        <a href="add_product.php" class="btn btn-primary fw-bold px-3 py-2 shadow-sm rounded-3">
-            <i class="fa-solid fa-plus me-1"></i> Add New Product
+<!-- Top Action Bar -->
+<div class="d-flex justify-content-end align-items-center mb-3">
+    <div class="d-flex flex-wrap gap-2">
+        <a href="print_products.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white fw-semibold shadow-sm px-3 rounded-3">
+            <i class="fa-solid fa-print me-1"></i> Print Products
         </a>
-        <a href="../sale/new_sale.php" class="btn btn-outline-secondary fw-semibold bg-white shadow-sm px-3 py-2 rounded-3">
-            <i class="fa-solid fa-cart-plus me-1 text-primary"></i> Create Sales Invoice
+        <a href="../sale/new_sale.php" class="btn btn-sm btn-outline-primary bg-white fw-semibold shadow-sm px-3 rounded-3">
+            <i class="fa-solid fa-cart-plus me-1"></i> Create Sales Invoice
+        </a>
+        <a href="add_product.php" class="btn btn-sm btn-primary fw-semibold shadow-sm px-3 rounded-3">
+            <i class="fa-solid fa-plus me-1"></i> Add New Product
         </a>
     </div>
 </div>
@@ -436,11 +441,14 @@ if ($db_connected && $pdo) {
             </select>
         </div>
 
-        <div class="col-md-1 d-flex gap-1">
+        <div class="col-md-2 d-flex gap-1">
             <button type="submit" class="btn btn-sm btn-primary w-100 fw-bold" title="Filter Records">
-                <i class="fa-solid fa-filter"></i>
+                <i class="fa-solid fa-filter me-1"></i> Filter
             </button>
-            <a href="view_product_list.php" class="btn btn-sm btn-outline-secondary" title="Reset Filters">
+            <a href="print_products.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white px-2 shadow-sm" title="Print Filtered Products">
+                <i class="fa-solid fa-print"></i>
+            </a>
+            <a href="view_product_list.php" class="btn btn-sm btn-outline-secondary px-2" title="Reset Filters">
                 <i class="fa-solid fa-undo"></i>
             </a>
         </div>

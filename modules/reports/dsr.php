@@ -3,6 +3,8 @@ require_once dirname(__DIR__, 2) . '/includes/functions.php';
 require_once dirname(__DIR__, 2) . '/config/config.php';
 require_once dirname(__DIR__, 2) . '/config/database.php';
 $page_title = 'Daily Sales Report';
+$compact_page_heading = true;
+$hide_topbar_title = true;
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: ' . BASE_URL . 'login.php'); exit;
 }

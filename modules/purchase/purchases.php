@@ -300,6 +300,16 @@ if ($db_connected && $pdo) {
         background: #dc2626;
         color: #ffffff !important;
     }
+    @media print {
+        .page-title-badge, .filter-card, .btn, .sidebar, .topbar, #sidebarWrapper, .pagination, .action-btn, th:last-child, td:last-child {
+            display: none !important;
+        }
+        body, .content, #content-wrapper {
+            background: #fff !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+    }
 </style>
 
 <!-- Top Title & Quick Action -->
@@ -313,12 +323,15 @@ if ($db_connected && $pdo) {
             <p class="text-muted small mb-0">Manage stock receiving, supplier invoices, payment balances & returns</p>
         </div>
     </div>
-    <div class="d-flex gap-2">
-        <a href="add_purchase.php" class="btn btn-primary fw-bold px-3 py-2 shadow-sm rounded-3">
-            <i class="fa-solid fa-plus me-1"></i> Add Inward Purchase
+    <div class="d-flex flex-wrap gap-2">
+        <a href="print_purchases.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white fw-semibold px-3 py-1.5 shadow-sm rounded-3">
+            <i class="fa-solid fa-print me-1"></i> Print Purchases
         </a>
-        <a href="purchase_return.php" class="btn btn-outline-danger fw-semibold bg-white shadow-sm px-3 py-2 rounded-3">
+        <a href="purchase_return.php" class="btn btn-sm btn-outline-danger fw-semibold bg-white shadow-sm px-3 py-1.5 rounded-3">
             <i class="fa-solid fa-undo me-1 text-danger"></i> Purchase Return
+        </a>
+        <a href="add_purchase.php" class="btn btn-sm btn-primary fw-semibold px-3 py-1.5 shadow-sm rounded-3">
+            <i class="fa-solid fa-plus me-1"></i> Add Inward Purchase
         </a>
     </div>
 </div>
@@ -422,10 +435,13 @@ if ($db_connected && $pdo) {
             <input type="date" name="start_date" class="form-control form-control-sm" value="<?= htmlspecialchars($start_date) ?>">
         </div>
 
-        <div class="col-md-2 d-flex gap-2">
+        <div class="col-md-2 d-flex gap-1">
             <button type="submit" class="btn btn-sm btn-primary w-100 fw-bold">
                 <i class="fa-solid fa-filter me-1"></i> Filter
             </button>
+            <a href="print_purchases.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white px-2 shadow-sm" title="Print Filtered Results">
+                <i class="fa-solid fa-print"></i>
+            </a>
             <a href="purchases.php" class="btn btn-sm btn-light border px-2" title="Reset Filters">
                 <i class="fa-solid fa-arrow-rotate-left text-muted"></i>
             </a>

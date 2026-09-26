@@ -18,6 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_c
     $shop_name    = trim($_POST['shop_name'] ?? '') ?: $name;
     $customer_code = generateCustomerCode();
     $invoice_type = ($_POST['invoice_type'] ?? 'sale') === 'warranty' ? 'warranty' : 'sale';
+    $license_number = ($invoice_type === 'warranty') ? trim($_POST['license_number'] ?? '') : null;
 
     $id = insert('customers', [
         'customer_code'   => $customer_code,
@@ -30,6 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_c
         'current_balance' => $opening,
         'status'          => 'Active',
         'invoice_type'    => $invoice_type,
+        'license_number'  => $license_number ?: null,
     ]);
     redirect('customers.php', 'Customer "' . $name . '" added — ' . $customer_code . '.');
 }
@@ -143,6 +145,11 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
             <td class="text-center">
               <?php if (($c['invoice_type'] ?? 'sale') === 'warranty'): ?>
                 <span class="badge badge-success"><i class="fas fa-shield-alt mr-1"></i>Warranty</span>
+                <?php if (!empty($c['license_number'])): ?>
+                  <div class="small text-muted mt-1 font-weight-bold" style="font-size:11px;" title="Drug / Trade License Number">
+                    <i class="fas fa-id-card text-secondary mr-1"></i><?= htmlspecialchars($c['license_number']) ?>
+                  </div>
+                <?php endif; ?>
               <?php else: ?>
                 <span class="badge badge-secondary">Sale</span>
               <?php endif; ?>
@@ -198,20 +205,21 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
               <input type="text" name="area" id="areaSearchInput" class="form-control" placeholder="Area / town likhna shuro karein..." autocomplete="off" required>
               <div id="areaResults" class="list-group position-absolute w-100 shadow d-none" style="z-index:1060;max-height:220px;overflow-y:auto;"></div>
             </div>
-            <small class="text-muted d-block mt-1" id="areaHint">Database ke saved areas yahan suggestion ke taur par aayenge. Naya area bhi type kar sakte hain.</small>
           </div>
           <div class="col-md-6 mb-3">
             <label class="form-label font-weight-bold">Opening Balance (PKR)</label>
             <input type="number" name="opening_balance" step="0.01" class="form-control" value="0">
-            <small class="text-muted">+ = amount already owed to you</small>
           </div>
           <div class="col-md-6 mb-3">
             <label class="form-label font-weight-bold">Invoice Type *</label>
-            <select name="invoice_type" class="form-control" required>
+            <select name="invoice_type" id="addInvoiceType" class="form-control" required onchange="toggleLicenseField(this.value)">
               <option value="sale">Sale Invoice (Simple, no warranty)</option>
               <option value="warranty">Warranty Invoice (with warranty section)</option>
             </select>
-            <small class="text-muted">Is customer ka print sales history page se hamesha isi type ka nikle ga</small>
+          </div>
+          <div class="col-md-6 mb-3 d-none" id="licenseNumberBox">
+            <label class="form-label font-weight-bold text-success"><i class="fas fa-id-card mr-1"></i> Customer License Number *</label>
+            <input type="text" name="license_number" id="licenseNumberInput" class="form-control border-success" placeholder="e.g. 05-A/1234/2024">
           </div>
           <div class="col-md-12 mb-3">
             <label class="form-label font-weight-bold">Address</label>
@@ -228,7 +236,23 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
 </div>
 
 <script>
+function toggleLicenseField(val) {
+  var box = document.getElementById('licenseNumberBox');
+  var input = document.getElementById('licenseNumberInput');
+  if (!box || !input) return;
+  if (val === 'warranty') {
+    box.classList.remove('d-none');
+    input.focus();
+  } else {
+    box.classList.add('d-none');
+    input.value = '';
+  }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
+  var sel = document.getElementById('addInvoiceType');
+  if (sel) { toggleLicenseField(sel.value); }
+
   var urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('add') === '1' || urlParams.get('action') === 'add') {
     $('#addCustomerModal').modal('show');

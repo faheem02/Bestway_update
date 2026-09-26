@@ -2,7 +2,8 @@
 /**
  * Bestway Wholesale Distribution - View Purchase Bill & Goods Receiving Note
  */
-$page_title = "View Purchase Details";
+$page_title = "Purchase Details";
+$compact_page_heading = true;
 require_once __DIR__ . '/../../includes/header.php';
 
 $purchase_id = intval($_GET['id'] ?? 0);
@@ -150,35 +151,30 @@ if (!$purchase) {
     }
 </style>
 
-<!-- Top Title & Navigation -->
-<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
-    <div class="d-flex align-items-center gap-3">
-        <div class="page-title-badge">
-            <i class="fa-solid fa-file-invoice"></i>
-        </div>
-        <div>
-            <div class="d-flex align-items-center gap-2">
-                <h4 class="fw-bold mb-0 text-dark">Bill #<?= htmlspecialchars($purchase['bill_no']) ?></h4>
-                <?php if ($purchase['payment_status'] === 'Paid'): ?>
-                    <span class="badge bg-success-subtle text-success border border-success px-2 py-1">Paid</span>
-                <?php elseif ($purchase['payment_status'] === 'Partial'): ?>
-                    <span class="badge bg-warning-subtle text-warning border border-warning px-2 py-1">Partial</span>
-                <?php else: ?>
-                    <span class="badge bg-danger-subtle text-danger border border-danger px-2 py-1">Unpaid</span>
-                <?php endif; ?>
-            </div>
-            <p class="text-muted small mb-0">Inward Goods Receiving Note details & supplier payable audit</p>
-        </div>
+<!-- Top Toolbar -->
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+    <div class="d-flex align-items-center gap-2">
+        <a href="purchases.php" class="btn btn-sm btn-outline-secondary bg-white rounded-3 shadow-sm">
+            <i class="fa-solid fa-arrow-left me-1"></i> All Purchases
+        </a>
+        <span class="badge bg-primary text-white font-monospace px-3 py-2" style="font-size:0.95rem;">
+            Bill #<?= htmlspecialchars($purchase['bill_no']) ?>
+        </span>
+        <?php if ($purchase['payment_status'] === 'Paid'): ?>
+            <span class="badge bg-success-subtle text-success border border-success px-2 py-1">Paid</span>
+        <?php elseif ($purchase['payment_status'] === 'Partial'): ?>
+            <span class="badge bg-warning-subtle text-warning border border-warning px-2 py-1">Partial</span>
+        <?php else: ?>
+            <span class="badge bg-danger-subtle text-danger border border-danger px-2 py-1">Unpaid</span>
+        <?php endif; ?>
+        <span class="text-muted small d-none d-md-inline ms-1">Recorded: <?= date('d M Y', strtotime($purchase['purchase_date'])) ?></span>
     </div>
-    <div class="d-flex gap-2">
-        <a href="print_purchase.php?id=<?= $purchase['id'] ?>" target="_blank" class="btn btn-success fw-bold px-3 py-2 shadow-sm rounded-3">
+    <div class="d-flex flex-wrap gap-2">
+        <a href="print_purchase.php?id=<?= $purchase['id'] ?>" target="_blank" class="btn btn-sm btn-success fw-bold px-3 py-2 shadow-sm rounded-3">
             <i class="fa-solid fa-print me-1"></i> Print GRN Slip
         </a>
-        <a href="edit_purchase.php?id=<?= $purchase['id'] ?>" class="btn btn-warning fw-bold px-3 py-2 shadow-sm rounded-3 text-dark">
+        <a href="edit_purchase.php?id=<?= $purchase['id'] ?>" class="btn btn-sm btn-warning fw-bold px-3 py-2 shadow-sm rounded-3 text-dark">
             <i class="fa-solid fa-edit me-1"></i> Edit Bill
-        </a>
-        <a href="purchases.php" class="btn btn-outline-secondary fw-semibold bg-white shadow-sm px-3 py-2 rounded-3">
-            <i class="fa-solid fa-arrow-left me-1"></i> All Purchases
         </a>
     </div>
 </div>
@@ -195,21 +191,13 @@ if (!$purchase) {
     <!-- Header Summary Strip -->
     <div class="bill-header-bar">
         <div class="row g-3 align-items-center">
-            <div class="col-md-3">
-                <span class="text-muted small d-block">Purchase Invoice Date</span>
+            <div class="col-md-6">
+                <span class="text-muted small d-block">Purchase Date</span>
                 <strong class="text-dark fs-6"><?= date('d F, Y', strtotime($purchase['purchase_date'])) ?></strong>
             </div>
-            <div class="col-md-3">
-                <span class="text-muted small d-block">Stock Receiving Date</span>
-                <strong class="text-dark fs-6"><?= date('d F, Y', strtotime($purchase['receiving_date'])) ?></strong>
-            </div>
-            <div class="col-md-3">
+            <div class="col-md-6 text-md-end">
                 <span class="text-muted small d-block">Payment Mode</span>
                 <strong class="text-primary fs-6"><?= htmlspecialchars($purchase['payment_type']) ?></strong>
-            </div>
-            <div class="col-md-3 text-md-end">
-                <span class="text-muted small d-block">Inventory Status</span>
-                <span class="badge bg-success px-3 py-2 fw-bold">Stock Received in Warehouse</span>
             </div>
         </div>
     </div>
@@ -261,13 +249,12 @@ if (!$purchase) {
                     <tr>
                         <th style="width: 50px;">#</th>
                         <th>Medicine / Brand Name</th>
-                        <th>Batch #</th>
-                        <th>Expiry</th>
                         <th class="text-center">Inward Qty</th>
                         <th class="text-center">Bonus</th>
-                        <th class="text-end">Cost (< TP)</th>
+                        <th class="text-end">Cost (&lt; TP)</th>
                         <th class="text-end">Official TP</th>
                         <th class="text-center">Disc %</th>
+                        <th class="text-center">GST %</th>
                         <th class="text-end">Total (Rs.)</th>
                     </tr>
                 </thead>
@@ -280,24 +267,12 @@ if (!$purchase) {
                                 <span class="badge bg-light text-muted border font-monospace"><?= htmlspecialchars($item['product_code']) ?></span>
                                 <span class="text-muted small ms-1"><?= htmlspecialchars($item['company_name'] ?? '') ?></span>
                             </td>
-                            <td>
-                                <span class="badge bg-light text-primary border font-monospace text-uppercase"><?= htmlspecialchars($item['batch_no']) ?></span>
-                            </td>
-                            <td>
-                                <span class="badge bg-secondary-subtle text-secondary font-monospace">
-                                    <?= date('M Y', strtotime($item['expiry_date'])) ?>
-                                </span>
-                            </td>
                             <td class="text-center">
                                 <span class="fw-bold text-dark"><?= number_format($item['quantity']) ?></span>
                                 <span class="text-muted small">Pcs</span>
                             </td>
-                            <td class="text-center">
-                                <?php if ($item['bonus_quantity'] > 0): ?>
-                                    <span class="badge bg-success-subtle text-success border border-success">+<?= $item['bonus_quantity'] ?></span>
-                                <?php else: ?>
-                                    <span class="text-muted">-</span>
-                                <?php endif; ?>
+                            <td class="text-center fw-bold">
+                                <?= intval($item['bonus_quantity'] ?? 0) ?>
                             </td>
                             <td class="text-end font-monospace text-danger fw-bold">
                                 Rs. <?= number_format($item['purchase_price'], 2) ?>
@@ -307,6 +282,9 @@ if (!$purchase) {
                             </td>
                             <td class="text-center">
                                 <?= ($item['discount_percent'] > 0) ? number_format($item['discount_percent'], 1) . '%' : '-' ?>
+                            </td>
+                            <td class="text-center font-monospace">
+                                <?= (($item['tax_percent'] ?? 0) > 0) ? '<span class="text-primary fw-bold">' . number_format($item['tax_percent'], 1) . '%</span>' : '-' ?>
                             </td>
                             <td class="text-end font-monospace fw-bold text-dark">
                                 Rs. <?= number_format($item['total_price'], 2) ?>

@@ -35,13 +35,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $phone = trim($_POST['phone'] ?? '');
     if ($name === '') { redirect('edit_customer.php?id='.$id, 'Name is required.', 'error'); }
     $invoice_type = ($_POST['invoice_type'] ?? 'sale') === 'warranty' ? 'warranty' : 'sale';
+    $license_number = ($invoice_type === 'warranty') ? trim($_POST['license_number'] ?? '') : null;
     update('customers', [
-        'name'         => $name,
-        'shop_name'    => trim($_POST['shop_name'] ?? '') ?: $name,
-        'phone'        => $phone,
-        'area'         => trim($_POST['area'] ?? ''),
-        'address'      => trim($_POST['address'] ?? ''),
-        'invoice_type' => $invoice_type,
+        'name'           => $name,
+        'shop_name'      => trim($_POST['shop_name'] ?? '') ?: $name,
+        'phone'          => $phone,
+        'area'           => trim($_POST['area'] ?? ''),
+        'address'        => trim($_POST['address'] ?? ''),
+        'invoice_type'   => $invoice_type,
+        'license_number' => $license_number ?: null,
     ], $id);
     redirect('customers.php', 'Customer "' . $name . '" updated.');
 }
@@ -79,11 +81,16 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <div class="col-md-6 mb-3">
           <label class="form-label font-weight-bold">Invoice Type *</label>
           <?php $cur_inv_type = ($customer['invoice_type'] ?? 'sale') === 'warranty' ? 'warranty' : 'sale'; ?>
-          <select name="invoice_type" class="form-control" required>
+          <select name="invoice_type" id="editInvoiceType" class="form-control" required onchange="toggleEditLicenseField(this.value)">
             <option value="sale" <?= $cur_inv_type === 'sale' ? 'selected' : '' ?>>Sale Invoice (Simple, no warranty)</option>
             <option value="warranty" <?= $cur_inv_type === 'warranty' ? 'selected' : '' ?>>Warranty Invoice (with warranty section)</option>
           </select>
           <small class="text-muted">Is customer ka print sales history page se hamesha isi type ka nikle ga</small>
+        </div>
+        <div class="col-md-6 mb-3 <?= $cur_inv_type === 'warranty' ? '' : 'd-none' ?>" id="editLicenseNumberBox">
+          <label class="form-label font-weight-bold text-success"><i class="fas fa-id-card mr-1"></i> Customer License Number *</label>
+          <input type="text" name="license_number" id="editLicenseNumberInput" class="form-control border-success" value="<?= htmlspecialchars($customer['license_number'] ?? '') ?>" placeholder="e.g. 05-A/1234/2024">
+          <small class="text-muted">Warranty invoice ke liye customer ka drug / trade license number</small>
         </div>
         <div class="col-md-12 mb-3">
           <label class="form-label font-weight-bold">Address</label>
@@ -99,6 +106,19 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
 </div>
 
 <script>
+function toggleEditLicenseField(val) {
+  var box = document.getElementById('editLicenseNumberBox');
+  var input = document.getElementById('editLicenseNumberInput');
+  if (!box || !input) return;
+  if (val === 'warranty') {
+    box.classList.remove('d-none');
+    input.focus();
+  } else {
+    box.classList.add('d-none');
+    input.value = '';
+  }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
   // ===== Live DB area search (Google/Chrome autofill NOT yahan — sirf DB suggestions) =====
   var editAreaTimer = null;

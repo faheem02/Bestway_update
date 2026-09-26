@@ -237,8 +237,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     INSERT INTO purchase_items (
                         purchase_id, product_id, batch_no, expiry_date,
                         quantity, raw_quantity, unit_type, bonus_quantity, purchase_price, trade_price,
-                        retail_price, discount_percent, discount_amount, total_price
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        retail_price, discount_percent, discount_amount, tax_percent, tax_amount, total_price
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
 
                 $stmt_stock = $pdo->prepare("
@@ -308,13 +308,19 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     // Financial calculation: gross = raw_qty * p_cost, disc_amt = gross * disc_pct / 100
                     $gross_row = $raw_qty * $p_cost;
                     $disc_amt  = round($gross_row * ($disc_pct / 100), 2);
-                    $row_total = floatval($itm['total_price'] ?? max(0, $gross_row - $disc_amt));
+                    $net_bef_tax = max(0, $gross_row - $disc_amt);
+                    $tax_pct   = floatval($itm['tax_percent'] ?? 0);
+                    $tax_amt   = floatval($itm['tax_amount'] ?? 0);
+                    if ($tax_amt <= 0 && $tax_pct > 0) {
+                        $tax_amt = round($net_bef_tax * ($tax_pct / 100), 2);
+                    }
+                    $row_total = floatval($itm['total_price'] ?? max(0, $net_bef_tax + $tax_amt));
 
                     // Distribute overall bill discount proportionally to calculate net effective cost
                     $bill_disc_ratio = ($subtotal > 0 && $discount_amount > 0) ? min(1, $discount_amount / $subtotal) : 0;
                     $row_net_after_bill_disc = max(0, $row_total * (1 - $bill_disc_ratio));
 
-                    // Net effective unit cost after BOTH discounts (Row discount + Bill discount), spread over total received qty incl. bonus
+                    // Net effective unit cost after BOTH discounts and item GST, spread over total received qty incl. bonus
                     $net_unit_cost = ($all_total_stock > 0) ? ($row_net_after_bill_disc / $all_total_stock) : $p_cost;
 
                     if ($pid > 0 && $all_total_stock > 0) {
@@ -322,7 +328,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
                             $raw_qty, $raw_qty, 'Pcs', $raw_bonus, $p_cost, $tp_rate,
-                            $sale_price, $disc_pct, $disc_amt, $row_total
+                            $sale_price, $disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
                         // Update Product Main Stock & Rates: add all_total_stock (purchased + bonus)
@@ -733,14 +739,17 @@ if ($db_connected && $pdo) {
                 <table class="table table-bordered table-hover mb-0 align-middle items-table" id="itemsTable">
                     <thead>
                         <tr>
-                            <th style="min-width: 260px;">Medicine / Product Name</th>
-                            <th style="width: 105px;" class="text-center">Quantity (Pcs)</th>
-                            <th style="width: 95px;" class="text-center">Bonus (Pcs)</th>
-                            <th style="width: 95px;" class="text-center">Total Qty</th>
-                            <th style="width: 125px;" class="text-right">TP / Cost (Rs.)</th>
-                            <th style="width: 90px;" class="text-center">Discount %</th>
-                            <th style="width: 135px;" class="text-right">Total (Rs.)</th>
-                            <th style="width: 45px;" class="text-center"></th>
+                            <th style="min-width: 220px;">Medicine / Product Name</th>
+                            <th style="width: 75px;" class="text-center">Qty</th>
+                            <th style="width: 70px;" class="text-center">Bonus</th>
+                            <th style="width: 70px;" class="text-center">Total Qty</th>
+                            <th style="width: 105px;" class="text-right">TP / Cost</th>
+                            <th style="width: 75px;" class="text-center">Disc %</th>
+                            <th style="width: 75px;" class="text-center">GST %</th>
+                            <th style="width: 110px;" class="text-right">Total (Rs.)</th>
+                            <th style="width: 95px;" class="text-center text-success">TP Disc %</th>
+                            <th style="width: 115px;" class="text-center text-primary">Sale Disc %</th>
+                            <th style="width: 40px;" class="text-center"></th>
                         </tr>
                     </thead>
                     <tbody id="itemsTableBody">
@@ -749,22 +758,16 @@ if ($db_connected && $pdo) {
                 </table>
             </div>
         </div>
-
-        <div class="card-footer bg-white border-top py-2 d-flex justify-content-end">
-            <button type="button" class="btn btn-sm btn-outline-primary font-weight-bold" onclick="addNewItemRow()">
-                <i class="fas fa-plus mr-1"></i> Add Row
-            </button>
-        </div>
     </div>
 
-    <!-- 3. Bottom Row: Payment Details & Selling Rate (Left) + Summary & Save (Right) -->
+    <!-- 3. Bottom Row: Payment Details & Notes (Left) + Summary & Save (Right) -->
     <div class="row">
-        <!-- Left: Payment Method, Accounts & Selling Rate -->
-        <div class="col-lg-7 mb-4">
+        <!-- Left: Payment Method, Accounts & Notes -->
+        <div class="col-lg-6 mb-4">
             <div class="card shadow h-100">
                 <div class="card-header py-3">
                     <h6 class="m-0 font-weight-bold text-primary">
-                        <i class="fas fa-credit-card mr-2"></i> Payment Details & Selling Rate
+                        <i class="fas fa-credit-card mr-2"></i> Payment Details & Remarks
                     </h6>
                 </div>
                 <div class="card-body">
@@ -801,71 +804,18 @@ if ($db_connected && $pdo) {
                                 <input type="hidden" name="bank_account_id" value="">
                             <?php endif; ?>
                         </div>
-
-
                     </div>
 
-                    <!-- Product Selling Rate Setting -->
-                    <div class="card border bg-light mt-2" id="salePriceCardSection">
-                        <div class="card-body p-3">
-                            <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
-                                <span class="font-weight-bold text-dark small text-uppercase">
-                                    <i class="fas fa-percentage text-primary mr-1"></i> Product Selling Rate Setting
-                                </span>
-                                <span id="activeProductBadge" class="badge badge-light border text-secondary font-monospace px-2 py-1">
-                                    No Product Selected
-                                </span>
-                            </div>
-
-                            <div class="row">
-                                <!-- Field 1: TP Discount Received (%) -->
-                                <div class="col-sm-6 mb-2">
-                                    <label class="form-label mb-1 text-success small font-weight-bold text-uppercase">
-                                        <i class="fas fa-tag mr-1"></i> TP Discount Received (%)
-                                    </label>
-                                    <div class="input-group input-group-sm">
-                                        <input type="text" id="cardAllDiscPct" class="form-control font-weight-bold text-success text-center bg-white" placeholder="0.00" value="" readonly>
-                                        <div class="input-group-append">
-                                            <span class="input-group-text bg-white text-success font-weight-bold">%</span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- Field 2: Sale Discount on TP (%) -->
-                                <div class="col-sm-6 mb-2">
-                                    <label class="form-label mb-1 text-primary small font-weight-bold text-uppercase">
-                                        <i class="fas fa-arrow-up mr-1"></i> Sale Discount on TP (%)
-                                    </label>
-                                    <div class="input-group input-group-sm">
-                                        <input type="number" step="0.01" min="0" max="100" id="cardSaleDiscPct" class="form-control font-weight-bold text-center text-primary bg-white" placeholder="0.00" onfocus="this.select()" oninput="onCardSaleDiscChange()">
-                                        <div class="input-group-append">
-                                            <span class="input-group-text bg-white text-primary font-weight-bold">%</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Result display: Sale Price & Margin / Profit -->
-                            <div class="mt-2 pt-2 border-top d-flex flex-wrap justify-content-between align-items-center small">
-                                <div>
-                                    <span class="text-muted">Sale Price:</span>
-                                    <strong class="text-primary ml-1" id="dispSalePrice">Rs. 0.00</strong>
-                                    <span class="text-muted ml-2">(Cost: <span class="text-danger" id="dispCardCost">Rs. 0.00</span>)</span>
-                                </div>
-                                <div id="dispMarginBadge">
-                                    <span class="badge badge-secondary px-2 py-1">
-                                        Enter Sale % to calculate Selling Rate
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
+                    <div class="mt-2">
+                        <label class="form-label font-weight-bold text-muted small">Notes / Delivery Remarks</label>
+                        <textarea name="notes" rows="4" class="form-control" placeholder="Optional notes..."></textarea>
                     </div>
                 </div>
             </div>
         </div>
 
         <!-- Right: Calculation Box & Actions -->
-        <div class="col-lg-5 mb-4">
+        <div class="col-lg-6 mb-4">
             <div class="card shadow h-100">
                 <div class="card-header py-3">
                     <h6 class="m-0 font-weight-bold text-primary">
@@ -900,32 +850,11 @@ if ($db_connected && $pdo) {
                             <input type="number" step="0.01" name="discount_amount" id="billDiscount" class="form-control form-control-sm text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" oninput="calculateBillTotals()">
                         </div>
 
-                        <!-- Bill GST / Sales Tax -->
-                        <div class="mb-2 p-2 rounded bg-light border">
-                            <div class="d-flex justify-content-between align-items-center mb-1">
-                                <label class="form-label small font-weight-bold text-primary mb-0">
-                                    <i class="fas fa-percent mr-1"></i> Bill GST / Sales Tax:
-                                </label>
-                                <span class="badge badge-primary font-weight-bold" id="gstBadgeDisplay">0.00%</span>
-                            </div>
-                            <div class="row no-gutters">
-                                <div class="col-5 pr-1">
-                                    <div class="input-group input-group-sm">
-                                        <input type="number" step="0.01" min="0" max="100" id="gstRatePct" class="form-control text-center font-weight-bold" placeholder="GST %" onfocus="this.select()" oninput="onGstPctChange()">
-                                        <div class="input-group-append">
-                                            <span class="input-group-text bg-white font-weight-bold">%</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-7 pl-1">
-                                    <div class="input-group input-group-sm">
-                                        <div class="input-group-prepend">
-                                            <span class="input-group-text bg-white font-weight-bold">Rs.</span>
-                                        </div>
-                                        <input type="number" step="0.01" min="0" name="tax_amount" id="taxAmount" class="form-control text-right font-weight-bold text-primary" placeholder="0.00" onfocus="this.select()" oninput="onGstAmtChange()">
-                                    </div>
-                                </div>
-                            </div>
+                        <!-- Auto-calculated Item-wise GST Summary Row -->
+                        <div class="calc-row py-1">
+                            <span class="text-muted"><i class="fas fa-percent text-primary mr-1"></i> Total Items GST:</span>
+                            <strong id="summaryTaxAmount" class="text-primary font-weight-bold">Rs. 0.00</strong>
+                            <input type="hidden" name="tax_amount" id="taxAmount" value="0.00">
                         </div>
 
                         <div class="calc-row grand-total">
@@ -1313,7 +1242,15 @@ function selectProductItem(rowId, p) {
     document.getElementById('cost_' + rowId).value = (baseCost > 0) ? baseCost.toFixed(2) : '';
     document.getElementById('tp_' + rowId).value   = (baseTp > 0) ? baseTp.toFixed(2) : '';
 
+    // If product has default sale discount in catalog, populate it
+    const defSaleDisc = parseFloat(product.discount_percent || 0);
+    const saleDiscEl = document.getElementById('saleDiscPct_' + rowId);
+    if (saleDiscEl) {
+        saleDiscEl.value = (defSaleDisc > 0) ? defSaleDisc.toFixed(2) : '';
+    }
+
     calculateRowTotal(rowId);
+    updateRowSalePrice(rowId);
     document.getElementById('medDropdown_' + rowId).classList.add('d-none');
     setActiveRow(rowId);
 
@@ -1328,9 +1265,7 @@ function selectProductItem(rowId, p) {
 
 function onCostChange(rowId) {
     calculateRowTotal(rowId);
-    if (activeRowId === rowId) {
-        syncCardWithRow(rowId);
-    }
+    updateRowSalePrice(rowId);
 }
 
 function clearMedSelection(rowId) {
@@ -1345,21 +1280,30 @@ function clearMedSelection(rowId) {
     if (document.getElementById('bonusQty_' + rowId)) document.getElementById('bonusQty_' + rowId).value = '';
     document.getElementById('discPct_' + rowId).value = '';
     document.getElementById('discAmt_' + rowId).value = '0.00';
+    if (document.getElementById('gstPct_' + rowId)) document.getElementById('gstPct_' + rowId).value = '';
+    if (document.getElementById('taxAmt_' + rowId)) document.getElementById('taxAmt_' + rowId).value = '0.00';
     document.getElementById('rowTotal_' + rowId).value = '';
+    if (document.getElementById('rowAllDiscPct_' + rowId)) document.getElementById('rowAllDiscPct_' + rowId).value = '0.00';
+    if (document.getElementById('effectiveCostDisp_' + rowId)) document.getElementById('effectiveCostDisp_' + rowId).textContent = 'Cost: 0.00';
+    if (document.getElementById('saleDiscPct_' + rowId)) document.getElementById('saleDiscPct_' + rowId).value = '';
+    if (document.getElementById('salePriceDisp_' + rowId)) document.getElementById('salePriceDisp_' + rowId).textContent = 'Sale: Rs. 0.00';
+    if (document.getElementById('salePrice_' + rowId)) document.getElementById('salePrice_' + rowId).value = '0.00';
     const discDisp = document.getElementById('discDisplay_' + rowId);
     if (discDisp) discDisp.innerHTML = '';
+    const bValDisp = document.getElementById('bonusValDisp_' + rowId);
+    if (bValDisp) bValDisp.innerHTML = '';
+    const dAmtDisp = document.getElementById('discAmtDisp_' + rowId);
+    if (dAmtDisp) dAmtDisp.innerHTML = '';
+    const tAmtDisp = document.getElementById('taxAmtDisp_' + rowId);
+    if (tAmtDisp) tAmtDisp.innerHTML = '';
     calculateRowTotal(rowId);
-
-    if (activeRowId === rowId) {
-        syncCardWithRow(rowId);
-    }
 
     document.getElementById('medSearch_' + rowId).focus();
     searchProductsForRow(rowId, '');
 }
 
 // ----------------------------------------------------
-// SALE PRICE & PROFIT MARKUP CARD LOGIC (Active Row Sync)
+// ROW SELECTION & HIGHLIGHT
 // ----------------------------------------------------
 let activeRowId = null;
 
@@ -1375,8 +1319,6 @@ function setActiveRow(rowId) {
     });
     const currRow = document.getElementById('row_' + rowId);
     if (currRow) currRow.classList.add('active-item-row');
-
-    syncCardWithRow(rowId);
 }
 
 function getRowEffectiveCost(rowId) {
@@ -1384,12 +1326,14 @@ function getRowEffectiveCost(rowId) {
 
     const costInput = document.getElementById('cost_' + rowId);
     const discInput = document.getElementById('discPct_' + rowId);
+    const gstInput  = document.getElementById('gstPct_' + rowId);
     const qtyEl     = document.getElementById('qty_' + rowId);
     const bonusEl   = document.getElementById('bonusQty_' + rowId);
 
     if (!costInput) return 0;
     const rawRate = parseFloat(costInput.value) || 0;
     const discPct = parseFloat(discInput ? discInput.value : 0) || 0;
+    const gstPct  = parseFloat(gstInput ? gstInput.value : 0) || 0;
     const qty     = parseFloat(qtyEl ? qtyEl.value : 0) || 0;
     const bonus   = parseFloat(bonusEl ? bonusEl.value : 0) || 0;
     const totalQty = qty + bonus;
@@ -1397,7 +1341,10 @@ function getRowEffectiveCost(rowId) {
     // 1. After Row Discount %
     const costAfterRowDisc = rawRate * (1 - (discPct / 100));
 
-    // 2. After Bill Discount (proportional to row total vs subtotal)
+    // 2. Add GST % on row (increases effective landed unit cost)
+    const costWithGst = costAfterRowDisc * (1 + (gstPct / 100));
+
+    // 3. After Bill Discount (proportional to row total vs subtotal)
     let totalSubtotal = 0;
     document.querySelectorAll('#itemsTableBody tr').forEach(tr => {
         const rId = tr.id.replace('row_', '');
@@ -1407,133 +1354,49 @@ function getRowEffectiveCost(rowId) {
 
     const billDiscount = parseFloat(document.getElementById('billDiscount')?.value) || 0;
 
-    let netEffectiveCost = costAfterRowDisc;
+    let netEffectiveCost = costWithGst;
     if (totalSubtotal > 0 && billDiscount > 0) {
         const billDiscRatio = Math.min(1, billDiscount / totalSubtotal);
-        netEffectiveCost = costAfterRowDisc * (1 - billDiscRatio);
+        netEffectiveCost = costWithGst * (1 - billDiscRatio);
     }
 
-    // 3. Landed unit cost after spreading discount over total received qty (purchased + free bonus)
+    // 4. Landed unit cost after spreading discount & GST over total received qty (purchased + free bonus)
     const landedUnitCost = totalQty > 0 ? (netEffectiveCost * qty) / totalQty : netEffectiveCost;
 
     return Math.max(0, landedUnitCost);
 }
 
-function syncCardWithRow(rowId) {
+function onRowSaleDiscChange(rowId) {
+    updateRowSalePrice(rowId);
+}
+
+function updateRowSalePrice(rowId) {
     if (!rowId || !document.getElementById('row_' + rowId)) return;
-
-    const medInput   = document.getElementById('medSearch_' + rowId);
-    const costInput  = document.getElementById('cost_' + rowId);   // purchase price (cost)
-    const tpInput    = document.getElementById('tp_' + rowId);     // trade/sale price
-    const baseTpInput = document.getElementById('baseTp_' + rowId); // original TP from catalog
-    const badge = document.getElementById('activeProductBadge');
-
-    const medName = medInput ? medInput.value.trim() : '';
-    if (badge) {
-        if (medName) {
-            badge.className = 'badge badge-primary font-monospace px-2 py-1';
-            badge.innerHTML = `<i class="fas fa-capsules mr-1"></i> Row ${rowId}: ${escapeHtml(medName.length > 28 ? medName.substring(0, 26) + '...' : medName)}`;
-            badge.title = `Row ${rowId}: ${medName}`;
-        } else {
-            badge.className = 'badge badge-light border text-secondary font-monospace px-2 py-1';
-            badge.textContent = `Row ${rowId} (Select Medicine)`;
-            badge.title = '';
-        }
-    }
-
-    const rawCost    = parseFloat(costInput  ? costInput.value  : 0) || 0;
-    const effectiveCost = getRowEffectiveCost(rowId);
-    const tpVal      = parseFloat(tpInput    ? tpInput.value    : 0) || 0;
-    const baseTpVal  = parseFloat(baseTpInput ? baseTpInput.value : 0) || rawCost; // TP from catalog
-
-    // 1. Set TP Discount Received (%) - effectiveCost already includes row/bill discount + free bonus qty
-    const allDiscPct = (rawCost > 0 && rawCost >= effectiveCost) ? (((rawCost - effectiveCost) / rawCost) * 100) : 0;
-    const allDiscInput = document.getElementById('cardAllDiscPct');
-    if (allDiscInput) {
-        allDiscInput.value = allDiscPct.toFixed(2);
-    }
-
-    // 2. Set Sale Discount on TP (%)
-    // Sale discount = how much below the product's original TP we are selling.
-    // Formula: saleDisc% = (baseTp - currentTp) / baseTp * 100
-    const saleDiscInput = document.getElementById('cardSaleDiscPct');
-    if (saleDiscInput && document.activeElement !== saleDiscInput) {
-        const rowSaleDiscInput = document.getElementById('saleDiscPct_' + rowId);
-        if (baseTpVal > 0) {
-            const calcSaleDisc = ((baseTpVal - tpVal) / baseTpVal) * 100;
-            saleDiscInput.value = (calcSaleDisc > 0) ? calcSaleDisc.toFixed(2) : '0.00';
-            if (rowSaleDiscInput) rowSaleDiscInput.value = saleDiscInput.value;
-        } else {
-            saleDiscInput.value = '0.00';
-            if (rowSaleDiscInput) rowSaleDiscInput.value = '0.00';
-        }
-    }
-
-    updateCardDisplay(effectiveCost, tpVal, rawCost);
-}
-
-function updateCardDisplay(cost, salePrice, rawCost) {
-    const dispCost = document.getElementById('dispCardCost');
-    const dispSale = document.getElementById('dispSalePrice');
-    const badgeEl  = document.getElementById('dispMarginBadge');
-
-    if (dispCost) dispCost.textContent = 'Rs. ' + cost.toFixed(2);
-    if (dispSale) dispSale.textContent = (salePrice > 0) ? ('Rs. ' + salePrice.toFixed(2)) : 'Rs. 0.00';
-
-    if (!badgeEl) return;
-
-    if (salePrice <= 0 || cost <= 0) {
-        badgeEl.innerHTML = '<span class="badge bg-secondary-subtle text-secondary border px-2 py-1" style="font-size: 0.80rem;">Enter Sale % to calculate Selling Rate</span>';
-        return;
-    }
-
-    const profit = salePrice - cost;
-    const marginPct = (profit / cost) * 100;
-
-    if (profit >= 0) {
-        badgeEl.innerHTML = `<span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1 fw-bold" style="font-size: 0.80rem;"><i class="fa-solid fa-arrow-up me-1"></i> Profit: Rs. +${profit.toFixed(2)}/unit (+${marginPct.toFixed(2)}%)</span>`;
-    } else {
-        badgeEl.innerHTML = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle px-2 py-1 fw-bold" style="font-size: 0.80rem;"><i class="fa-solid fa-arrow-down me-1"></i> Loss: Rs. -${Math.abs(profit).toFixed(2)}/unit (${marginPct.toFixed(2)}%)</span>`;
-    }
-}
-
-function onCardSaleDiscChange() {
-    if (!activeRowId || !document.getElementById('row_' + activeRowId)) {
-        const firstRow = document.querySelector('#itemsTableBody tr');
-        if (firstRow) {
-            setActiveRow(firstRow.id.replace('row_', ''));
-        } else {
-            return;
-        }
-    }
-
-    const saleDiscPct   = parseFloat(document.getElementById('cardSaleDiscPct').value) || 0;
-    const rawCost       = parseFloat(document.getElementById('cost_' + activeRowId)?.value || 0) || 0;
-    const effectiveCost = getRowEffectiveCost(activeRowId);
-
-    // baseTp = the product's original Trade Price from catalog (set when product is selected)
-    const baseTpInput = document.getElementById('baseTp_' + activeRowId);
-    // baseTp is set at product selection time; if no product selected yet, fall back to rawCost
-    let baseTp = parseFloat(baseTpInput ? baseTpInput.value : 0) || 0;
+    const costInput     = document.getElementById('cost_' + rowId);
+    const rawCost       = parseFloat(costInput ? costInput.value : 0) || 0;
+    const baseTpInput   = document.getElementById('baseTp_' + rowId);
+    let baseTp          = parseFloat(baseTpInput ? baseTpInput.value : 0) || 0;
     if (baseTp <= 0) baseTp = rawCost;
 
-    // Selling price = BasTP * (1 - Sale Discount % / 100)
-    // Sale Discount is always relative to the product's Trade Price (TP), NOT purchase cost
+    const saleDiscInput = document.getElementById('saleDiscPct_' + rowId);
+    const saleDiscPct   = parseFloat(saleDiscInput ? saleDiscInput.value : 0) || 0;
+
+    // Selling price = BaseTP * (1 - Sale Discount % / 100)
     const calcSalePrice = Math.max(0, baseTp * (1 - (saleDiscPct / 100)));
 
-    // Update the tp_ hidden input (trade price / selling rate for this row)
-    const tpInput = document.getElementById('tp_' + activeRowId);
-    if (tpInput) tpInput.value = calcSalePrice.toFixed(2);
+    const tpInput        = document.getElementById('tp_' + rowId);
+    const salePriceInput = document.getElementById('salePrice_' + rowId);
+    if (tpInput)        tpInput.value        = calcSalePrice.toFixed(2);
+    if (salePriceInput) salePriceInput.value = calcSalePrice.toFixed(2);
 
-    // Write sale_discount_percent and sale_price to hidden form inputs so they POST correctly
-    const salePriceInput   = document.getElementById('salePrice_'   + activeRowId);
-    const saleDiscPctInput = document.getElementById('saleDiscPct_' + activeRowId);
-    if (salePriceInput)   salePriceInput.value   = calcSalePrice.toFixed(2);
-    if (saleDiscPctInput) saleDiscPctInput.value = saleDiscPct.toFixed(2);
-
-    // NOTE: baseTp_ is kept unchanged — it represents the original TP reference, not the computed selling price
-
-    updateCardDisplay(effectiveCost, calcSalePrice, rawCost);
+    const dispSale = document.getElementById('salePriceDisp_' + rowId);
+    if (dispSale) {
+        if (calcSalePrice > 0) {
+            dispSale.innerHTML = `Sale: <strong class="text-primary">Rs. ${calcSalePrice.toFixed(2)}</strong>`;
+        } else {
+            dispSale.innerHTML = `Sale: <span class="text-muted">Rs. 0.00</span>`;
+        }
+    }
 }
 
 function onMedSearchKeydown(e, rowId) {
@@ -1625,48 +1488,77 @@ function addNewItemRow() {
             <input type="hidden" id="packsPerBox_${rowCounter}" value="1">
             <input type="hidden" id="totalQty_${rowCounter}" value="0">
             <input type="hidden" id="allTotalQty_${rowCounter}" value="0">
-            <input type="hidden" name="items[${rowCounter}][trade_price]" id="tp_${rowCounter}" value="0.00">
             <input type="hidden" name="items[${rowCounter}][batch_no]" value="DEFAULT">
             <input type="hidden" name="items[${rowCounter}][expiry_date]" value="<?= date('Y-m-d', strtotime('+2 years')) ?>">
-            <input type="hidden" name="items[${rowCounter}][sale_discount_percent]" id="saleDiscPct_${rowCounter}" value="0.00">
-
-            <input type="hidden" name="items[${rowCounter}][sale_price]" id="salePrice_${rowCounter}" value="0.00">
         </td>
 
         <!-- 2. Quantity (Pcs) -->
-        <td style="width: 105px;">
+        <td style="width: 75px;">
             <input type="number" min="1" name="items[${rowCounter}][quantity]" id="qty_${rowCounter}" class="form-control text-center font-weight-bold" placeholder="1" value="" onfocus="this.select()" required oninput="calculateRowTotal(${rowCounter})">
         </td>
 
         <!-- 3. Bonus Quantity (Pcs) -->
-        <td style="width: 95px;">
+        <td style="width: 70px;">
             <input type="number" min="0" name="items[${rowCounter}][bonus_quantity]" id="bonusQty_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
+            <div id="bonusValDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 3.5 Total Quantity (Pcs) -->
-        <td style="width: 95px;">
+        <td style="width: 70px;">
             <input type="number" readonly id="totalQtyDisp_${rowCounter}" class="form-control text-center font-weight-bold col-all-total" placeholder="0" value="">
         </td>
 
         <!-- 4. Purchase Rate / TP -->
-        <td style="width: 125px;">
+        <td style="width: 105px;">
             <input type="number" step="0.01" min="0" name="items[${rowCounter}][purchase_price]" id="cost_${rowCounter}" class="form-control text-right font-weight-bold" placeholder="0.00" value="" onfocus="this.select()" required oninput="onCostChange(${rowCounter})">
         </td>
 
         <!-- 5. Discount % -->
-        <td style="width: 90px;">
+        <td style="width: 75px;">
             <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold" placeholder="0.00" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][discount_amount]" id="discAmt_${rowCounter}" value="0.00">
+            <div id="discAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
+        </td>
+
+        <!-- 5.5 GST % -->
+        <td style="width: 75px;">
+            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][tax_percent]" id="gstPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
+            <input type="hidden" name="items[${rowCounter}][tax_amount]" id="taxAmt_${rowCounter}" value="0.00">
+            <div id="taxAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 6. Total (Rs.) -->
-        <td style="width: 135px;">
+        <td style="width: 110px;">
             <input type="number" step="0.01" readonly name="items[${rowCounter}][total_price]" id="rowTotal_${rowCounter}" class="form-control text-right font-weight-bold col-row-total" placeholder="0.00" value="">
-            <div id="discDisplay_${rowCounter}" class="text-right mt-1" style="font-size: 0.70rem; line-height: 1.3;"></div>
+            <div id="discDisplay_${rowCounter}" class="text-right mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
-        <!-- 7. Action -->
-        <td class="text-center" style="width: 45px;">
+        <!-- 7. TP Disc. Recv % -->
+        <td style="width: 95px;">
+            <div class="input-group input-group-sm">
+                <input type="text" readonly id="rowAllDiscPct_${rowCounter}" class="form-control text-center font-weight-bold text-success bg-light" placeholder="0.00" value="0.00">
+                <div class="input-group-append">
+                    <span class="input-group-text bg-light text-success font-weight-bold px-1" style="font-size:0.70rem;">%</span>
+                </div>
+            </div>
+            <div id="effectiveCostDisp_${rowCounter}" class="text-center text-muted mt-1" style="font-size: 0.68rem;">Cost: 0.00</div>
+        </td>
+
+        <!-- 8. Sale Disc on TP % -->
+        <td style="width: 115px;">
+            <div class="input-group input-group-sm">
+                <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][sale_discount_percent]" id="saleDiscPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" oninput="onRowSaleDiscChange(${rowCounter})">
+                <div class="input-group-append">
+                    <span class="input-group-text bg-white text-primary font-weight-bold px-1" style="font-size:0.70rem;">%</span>
+                </div>
+            </div>
+            <div id="salePriceDisp_${rowCounter}" class="text-center font-weight-bold text-primary mt-1" style="font-size: 0.70rem;">Sale: Rs. 0.00</div>
+            <input type="hidden" name="items[${rowCounter}][trade_price]" id="tp_${rowCounter}" value="0.00">
+            <input type="hidden" name="items[${rowCounter}][sale_price]" id="salePrice_${rowCounter}" value="0.00">
+        </td>
+
+        <!-- 9. Action -->
+        <td class="text-center" style="width: 40px;">
             <button type="button" class="btn-remove-row" title="Remove" onclick="removeRow(${rowCounter})">
                 <i class="fas fa-times"></i>
             </button>
@@ -1683,6 +1575,8 @@ function calculateRowTotal(rowId) {
     const costEl    = document.getElementById('cost_' + rowId);
     const discPctEl = document.getElementById('discPct_' + rowId);
     const discAmtEl = document.getElementById('discAmt_' + rowId);
+    const gstPctEl  = document.getElementById('gstPct_' + rowId);
+    const taxAmtEl  = document.getElementById('taxAmt_' + rowId);
     const totalEl   = document.getElementById('rowTotal_' + rowId);
     const bonusEl   = document.getElementById('bonusQty_' + rowId);
     const totalQtyEl     = document.getElementById('totalQty_' + rowId);
@@ -1696,16 +1590,19 @@ function calculateRowTotal(rowId) {
     const totalQty = qty + bonus;
     const cost    = parseFloat(costEl.value) || 0;
     const discPct = parseFloat(discPctEl.value) || 0;
+    const gstPct  = parseFloat(gstPctEl ? gstPctEl.value : 0) || 0;
 
     // Total quantity display (purchased + bonus)
     if (totalQtyDispEl) totalQtyDispEl.value = (totalQty > 0) ? totalQty : '';
     if (totalQtyEl) totalQtyEl.value = qty;
     if (allTotalQtyEl) allTotalQtyEl.value = totalQty;
 
-    // Financial Calculation (Net payable on purchased qty)
-    const gross    = qty * cost;
-    const discAmt  = parseFloat((gross * (discPct / 100)).toFixed(2));
-    const netTotal = Math.max(0, parseFloat((gross - discAmt).toFixed(2)));
+    // Financial Calculation (Gross -> Disc -> GST -> Net payable)
+    const gross      = qty * cost;
+    const discAmt    = parseFloat((gross * (discPct / 100)).toFixed(2));
+    const netBefTax  = Math.max(0, parseFloat((gross - discAmt).toFixed(2)));
+    const taxAmt     = parseFloat((netBefTax * (gstPct / 100)).toFixed(2));
+    const netTotal   = Math.max(0, parseFloat((netBefTax + taxAmt).toFixed(2)));
 
     // Bonus value + combined discount benefit
     const bonusValue = parseFloat((bonus * cost).toFixed(2));
@@ -1714,21 +1611,45 @@ function calculateRowTotal(rowId) {
     const benefitPct = totalValue > 0 ? (discountBenefit / totalValue * 100) : 0;
 
     if (discAmtEl) discAmtEl.value = discAmt.toFixed(2);
+    if (taxAmtEl) taxAmtEl.value = taxAmt.toFixed(2);
     totalEl.value = (netTotal > 0) ? netTotal.toFixed(2) : (qty > 0 && cost > 0 ? '0.00' : '');
+
+    const bonusValDisp = document.getElementById('bonusValDisp_' + rowId);
+    if (bonusValDisp) {
+        bonusValDisp.innerHTML = (bonusValue > 0) ? `<span class="text-info font-weight-bold">+Rs. ${bonusValue.toFixed(2)}</span>` : '';
+    }
+
+    const discAmtDisp = document.getElementById('discAmtDisp_' + rowId);
+    if (discAmtDisp) {
+        discAmtDisp.innerHTML = (discAmt > 0) ? `<span class="text-success font-weight-bold">-Rs. ${discAmt.toFixed(2)}</span>` : '';
+    }
+
+    const taxAmtDisp = document.getElementById('taxAmtDisp_' + rowId);
+    if (taxAmtDisp) {
+        taxAmtDisp.innerHTML = (taxAmt > 0) ? `<span class="text-primary font-weight-bold">+Rs. ${taxAmt.toFixed(2)}</span>` : '';
+    }
 
     const discDisplay = document.getElementById('discDisplay_' + rowId);
     if (discDisplay) {
-        if (discAmt > 0 || bonusValue > 0) {
-            discDisplay.innerHTML = `
-                ${discAmt > 0 ? `<span class="text-success fw-semibold d-block">Disc: -${discAmt.toFixed(2)}${discPct > 0 ? ` (${discPct}%)` : ''}</span>` : ''}
-                ${bonusValue > 0 ? `<span class="text-primary fw-semibold d-block">Bonus: +${bonusValue.toFixed(2)} (${bonus} Pcs)</span>` : ''}
-                <span class="text-danger fw-bold d-block mt-1">Benefit: ${discountBenefit.toFixed(2)} (${benefitPct.toFixed(2)}%)</span>
-            `;
+        if (discountBenefit > 0) {
+            discDisplay.innerHTML = `<span class="text-danger font-weight-bold" title="Total Benefit (Disc + Free Bonus Goods)">Benefit: ${discountBenefit.toFixed(2)} (${benefitPct.toFixed(1)}%)</span>`;
         } else {
             discDisplay.innerHTML = '';
         }
     }
 
+    // Update row-level TP Discount Received (%)
+    const rawCost = parseFloat(costEl.value) || 0;
+    const effectiveCost = getRowEffectiveCost(rowId);
+    const allDiscPct = (rawCost > 0 && rawCost >= effectiveCost) ? (((rawCost - effectiveCost) / rawCost) * 100) : 0;
+    
+    const rowAllDiscInput = document.getElementById('rowAllDiscPct_' + rowId);
+    if (rowAllDiscInput) rowAllDiscInput.value = allDiscPct.toFixed(2);
+
+    const effCostDisp = document.getElementById('effectiveCostDisp_' + rowId);
+    if (effCostDisp) effCostDisp.textContent = 'Cost: ' + effectiveCost.toFixed(2);
+
+    updateRowSalePrice(rowId);
     calculateBillTotals();
 }
 
@@ -1737,37 +1658,13 @@ function removeRow(rowId) {
     if (tr) {
         tr.remove();
         calculateBillTotals();
-        if (activeRowId === rowId) {
-            const nextRow = document.querySelector('#itemsTableBody tr');
-            if (nextRow) {
-                const nextId = parseInt(nextRow.id.replace('row_', ''));
-                setActiveRow(nextId);
-            } else {
-                activeRowId = null;
-                const badge = document.getElementById('activeProductBadge');
-                if (badge) {
-                    badge.className = 'badge bg-white text-secondary border font-monospace px-2 py-1';
-                    badge.textContent = 'No Product Selected';
-                    badge.title = '';
-                }
-                const allDiscInput = document.getElementById('cardAllDiscPct');
-                if (allDiscInput) allDiscInput.value = '0.00';
-                const saleDiscInput = document.getElementById('cardSaleDiscPct');
-                if (saleDiscInput) saleDiscInput.value = '';
-                const dispCost = document.getElementById('dispCardCost');
-                if (dispCost) dispCost.textContent = 'Rs. 0.00';
-                const dispSale = document.getElementById('dispSalePrice');
-                if (dispSale) dispSale.textContent = 'Rs. 0.00';
-                const badgeEl = document.getElementById('dispMarginBadge');
-                if (badgeEl) badgeEl.innerHTML = '<span class="badge bg-secondary-subtle text-secondary border px-2 py-1" style="font-size: 0.80rem;">Enter Sale % to calculate Selling Rate</span>';
-            }
-        }
     }
 }
 
 function calculateBillTotals() {
     const rows = document.querySelectorAll('#itemsTableBody tr');
     let subtotal      = 0;
+    let totalTax      = 0;
     let grossSum      = 0;  // Qty × Cost (before discount)
     let totalStockQty = 0;  // All physical inward packs
     let totalPurchQty = 0;  // Purchased base packs
@@ -1780,56 +1677,46 @@ function calculateBillTotals() {
         const qtyEl         = document.getElementById('qty_' + rowId);
         const costEl        = document.getElementById('cost_' + rowId);
         const rTotalEl      = document.getElementById('rowTotal_' + rowId);
+        const taxAmtEl      = document.getElementById('taxAmt_' + rowId);
 
         const baseQty    = parseInt(totalQtyEl ? totalQtyEl.value : 0) || 0;
         const allBaseQty = parseInt(allTotalQtyEl ? allTotalQtyEl.value : 0) || baseQty;
         const rawQty     = parseFloat(qtyEl ? qtyEl.value : 0) || 0;
         const cost       = parseFloat(costEl ? costEl.value : 0) || 0;
         const rTotal     = parseFloat(rTotalEl ? rTotalEl.value : 0) || 0;
+        const taxAmt     = parseFloat(taxAmtEl ? taxAmtEl.value : 0) || 0;
 
         totalPurchQty += baseQty;
         totalStockQty += allBaseQty;
         subtotal      += rTotal;
+        totalTax      += taxAmt;
         grossSum      += (rawQty * cost);
     });
 
     totalBonusQty = Math.max(0, totalStockQty - totalPurchQty);
 
-    const billDiscount = parseFloat(document.getElementById('billDiscount').value) || 0;
-    const netBeforeTax = Math.max(0, subtotal - billDiscount);
+    const billDiscount = parseFloat(document.getElementById('billDiscount')?.value) || 0;
 
-    const gstPctInput = document.getElementById('gstRatePct');
     const taxAmtInput = document.getElementById('taxAmount');
-    const gstBadge    = document.getElementById('gstBadgeDisplay');
+    if (taxAmtInput) taxAmtInput.value = totalTax.toFixed(2);
+    const summaryTax = document.getElementById('summaryTaxAmount');
+    if (summaryTax) summaryTax.textContent = 'Rs. ' + totalTax.toFixed(2);
 
-    // Auto recalculate GST amount if GST % is entered and user isn't currently typing in the tax amount field
-    if (gstPctInput && parseFloat(gstPctInput.value) > 0 && document.activeElement !== taxAmtInput) {
-        const pct = parseFloat(gstPctInput.value);
-        const autoAmt = (netBeforeTax * (pct / 100));
-        taxAmtInput.value = autoAmt.toFixed(2);
-        if (gstBadge) gstBadge.textContent = pct.toFixed(2) + '%';
-    } else if (taxAmtInput && parseFloat(taxAmtInput.value) > 0 && netBeforeTax > 0 && document.activeElement === taxAmtInput) {
-        const amt = parseFloat(taxAmtInput.value);
-        const pct = (amt / netBeforeTax) * 100;
-        if (gstPctInput) gstPctInput.value = pct.toFixed(2);
-        if (gstBadge) gstBadge.textContent = pct.toFixed(2) + '%';
-    }
-
-    const taxAmount    = parseFloat(taxAmtInput ? taxAmtInput.value : 0) || 0;
-    const grandTotal   = Math.max(0, netBeforeTax + taxAmount);
+    const grandTotal = Math.max(0, subtotal - billDiscount);
 
     // Row-level discount + bill discount
-    const rowLevelDisc = Math.max(0, grossSum - subtotal);
-    const totalDiscAmt = rowLevelDisc + billDiscount;
-    const totalDiscPct = (grossSum > 0) ? ((totalDiscAmt / grossSum) * 100) : 0;
+    const netBeforeTaxSum = Math.max(0, subtotal - totalTax);
+    const rowLevelDisc    = Math.max(0, grossSum - netBeforeTaxSum);
+    const totalDiscAmt    = rowLevelDisc + billDiscount;
+    const totalDiscPct    = (grossSum > 0) ? ((totalDiscAmt / grossSum) * 100) : 0;
 
     const discPctRow = document.getElementById('discountPctRow');
-    if (totalDiscAmt > 0) {
+    if (totalDiscAmt > 0 && discPctRow) {
         discPctRow.style.removeProperty('display');
         discPctRow.style.display = 'flex';
         document.getElementById('summaryDiscountAmt').textContent = 'Rs. ' + totalDiscAmt.toFixed(2);
         document.getElementById('summaryDiscountPct').textContent = totalDiscPct.toFixed(2) + '%';
-    } else {
+    } else if (discPctRow) {
         discPctRow.style.display = 'none';
     }
 
@@ -1858,49 +1745,18 @@ function calculateBillTotals() {
     document.getElementById('hiddenGrandTotal').value    = grandTotal.toFixed(2);
     document.getElementById('hiddenBalanceAmount').value = balanceDue.toFixed(2);
 
-    if (activeRowId && document.getElementById('row_' + activeRowId)) {
-        syncCardWithRow(activeRowId);
-    }
-}
-
-function onGstPctChange() {
-    const subtotal = parseFloat(document.getElementById('hiddenSubtotal').value) || 0;
-    const billDiscount = parseFloat(document.getElementById('billDiscount').value) || 0;
-    const netBeforeTax = Math.max(0, subtotal - billDiscount);
-    const gstPctInput = document.getElementById('gstRatePct');
-    const taxAmtInput = document.getElementById('taxAmount');
-    const gstBadge    = document.getElementById('gstBadgeDisplay');
-
-    const pct = parseFloat(gstPctInput.value) || 0;
-    if (pct > 0 && netBeforeTax > 0) {
-        const amt = (netBeforeTax * (pct / 100));
-        taxAmtInput.value = amt.toFixed(2);
-        if (gstBadge) gstBadge.textContent = pct.toFixed(2) + '%';
-    } else if (pct === 0) {
-        taxAmtInput.value = '';
-        if (gstBadge) gstBadge.textContent = '0.00%';
-    }
-    calculateBillTotals();
-}
-
-function onGstAmtChange() {
-    const subtotal = parseFloat(document.getElementById('hiddenSubtotal').value) || 0;
-    const billDiscount = parseFloat(document.getElementById('billDiscount').value) || 0;
-    const netBeforeTax = Math.max(0, subtotal - billDiscount);
-    const gstPctInput = document.getElementById('gstRatePct');
-    const taxAmtInput = document.getElementById('taxAmount');
-    const gstBadge    = document.getElementById('gstBadgeDisplay');
-
-    const amt = parseFloat(taxAmtInput.value) || 0;
-    if (amt > 0 && netBeforeTax > 0) {
-        const pct = (amt / netBeforeTax) * 100;
-        gstPctInput.value = pct.toFixed(2);
-        if (gstBadge) gstBadge.textContent = pct.toFixed(2) + '%';
-    } else {
-        gstPctInput.value = '';
-        if (gstBadge) gstBadge.textContent = '0.00%';
-    }
-    calculateBillTotals();
+    // Update TP Discount Received for all rows in case bill discount changed
+    rows.forEach(tr => {
+        const rId = tr.id.replace('row_', '');
+        const cInput = document.getElementById('cost_' + rId);
+        const rCost = parseFloat(cInput ? cInput.value : 0) || 0;
+        const effCost = getRowEffectiveCost(rId);
+        const allPct = (rCost > 0 && rCost >= effCost) ? (((rCost - effCost) / rCost) * 100) : 0;
+        const radInput = document.getElementById('rowAllDiscPct_' + rId);
+        if (radInput) radInput.value = allPct.toFixed(2);
+        const ecDisp = document.getElementById('effectiveCostDisp_' + rId);
+        if (ecDisp) ecDisp.textContent = 'Cost: ' + effCost.toFixed(2);
+    });
 }
 
 function togglePaymentFields() {

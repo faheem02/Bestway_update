@@ -360,7 +360,6 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <h5 class="mb-0 font-weight-bold text-dark">
           Delivery List / Loading Sheet
         </h5>
-        <small class="text-muted">Vehicle loading sheet with product rates, quantities, cartons, and customer vouchers</small>
       </div>
     </div>
     <div class="d-flex flex-wrap mt-2 mt-md-0 gap-2 align-items-center">

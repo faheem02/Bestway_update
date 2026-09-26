@@ -69,35 +69,46 @@ if (!$invoice) die('Invoice not found.');
 // Har customer ko add/edit karte waqt "Invoice Type" (Sale / Warranty) allocate hoti hai.
 // Agar URL me type nahi diya gaya to us customer ki saved preference ke hisab se sahi invoice khud-b-khud print hogi.
 // &manual=1 dene se selection screen dobara dikhai ja sakti hai (override ke liye).
-$manual = isset($_GET['manual']);
-if ($type === '' && !$manual) {
-    $cust_id = intval($invoice['customer_id'] ?? 0);
-    $detected_type = null;
+$cust_license = '';
+$cust_id = intval($invoice['customer_id'] ?? 0);
+$detected_type = null;
 
-    if ($cust_id > 0) {
-        try {
-            $ct = $pdo->prepare("SELECT invoice_type FROM customers WHERE id = ? LIMIT 1");
-            $ct->execute([$cust_id]);
-            $crow = $ct->fetch();
-            if ($crow && !empty($crow['invoice_type'])) {
+if ($cust_id > 0) {
+    try {
+        $ct = $pdo->prepare("SELECT invoice_type, license_number FROM customers WHERE id = ? LIMIT 1");
+        $ct->execute([$cust_id]);
+        $crow = $ct->fetch();
+        if ($crow) {
+            if (!empty($crow['invoice_type'])) {
                 $detected_type = strtolower(trim($crow['invoice_type']));
             }
-        } catch (Exception $e) {}
-    }
+            if (!empty($crow['license_number'])) {
+                $cust_license = trim($crow['license_number']);
+            }
+        }
+    } catch (Exception $e) {}
+}
 
-    // Fallback: match by customer_name if customer_id was not linked
-    if (!$detected_type && !empty($invoice['customer_name'])) {
-        try {
-            $cname = trim($invoice['customer_name']);
-            $ct2 = $pdo->prepare("SELECT invoice_type FROM customers WHERE name = ? OR shop_name = ? LIMIT 1");
-            $ct2->execute([$cname, $cname]);
-            $crow2 = $ct2->fetch();
-            if ($crow2 && !empty($crow2['invoice_type'])) {
+// Fallback: match by customer_name if customer_id was not linked or license was empty
+if ((!$detected_type || empty($cust_license)) && !empty($invoice['customer_name'])) {
+    try {
+        $cname = trim($invoice['customer_name']);
+        $ct2 = $pdo->prepare("SELECT invoice_type, license_number FROM customers WHERE name = ? OR shop_name = ? LIMIT 1");
+        $ct2->execute([$cname, $cname]);
+        $crow2 = $ct2->fetch();
+        if ($crow2) {
+            if (!$detected_type && !empty($crow2['invoice_type'])) {
                 $detected_type = strtolower(trim($crow2['invoice_type']));
             }
-        } catch (Exception $e) {}
-    }
+            if (empty($cust_license) && !empty($crow2['license_number'])) {
+                $cust_license = trim($crow2['license_number']);
+            }
+        }
+    } catch (Exception $e) {}
+}
 
+$manual = isset($_GET['manual']);
+if ($type === '' && !$manual) {
     if ($detected_type && in_array($detected_type, ['sale', 'warranty'], true)) {
         $type = $detected_type;
     } else {
@@ -128,6 +139,7 @@ $paid        = (float)($invoice['paid_amount']  ?? 0);
 $balance_due = (float)($invoice['balance_due']  ?? ($grand_total - $paid));
 $prev_bal    = (float)($invoice['previous_balance'] ?? 0);
 $net_payable = (float)($invoice['net_payable']  ?? ($grand_total + $prev_bal));
+$inv_balance = max(0, $grand_total - $paid);
 $pay_method  = htmlspecialchars($invoice['payment_method'] ?? 'Credit');
 
 // Totals
@@ -328,6 +340,9 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
         <div class="font-weight-bold mt-1" style="font-size:14px;"><?= $cust_name ?></div>
         <?php if ($cust_phone): ?><div class="text-muted small"><i class="fas fa-phone mr-1"></i><?= $cust_phone ?></div><?php endif; ?>
         <?php if ($route_name): ?><div class="text-muted small"><i class="fas fa-map-marker-alt mr-1"></i>Area: <?= $route_name ?></div><?php endif; ?>
+        <?php if ($type === 'warranty' && !empty($cust_license)): ?>
+          <div class="small font-weight-bold mt-1 text-dark"><i class="fas fa-id-card text-success mr-1"></i>Drug Lic #: <span class="text-primary font-weight-bold"><?= htmlspecialchars($cust_license) ?></span></div>
+        <?php endif; ?>
       </div>
     </div>
     <div class="col-5">
@@ -414,27 +429,18 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
           <span class="text-danger font-monospace">— Rs. <?= number_format($discount, 2) ?></span>
         </div>
         <?php endif; ?>
+
         <div class="totals-row totals-grand">
           <span>Bill Total:</span>
           <span class="font-monospace">Rs. <?= number_format($grand_total, 2) ?></span>
         </div>
-        <?php if ($prev_bal > 0): ?>
-        <div class="totals-row">
-          <span class="text-muted">Previous Balance:</span>
-          <span class="font-monospace">+ Rs. <?= number_format($prev_bal, 2) ?></span>
-        </div>
-        <div class="totals-row font-weight-bold">
-          <span>Net Payable:</span>
-          <span class="font-monospace">Rs. <?= number_format($net_payable, 2) ?></span>
-        </div>
-        <?php endif; ?>
         <div class="totals-row">
           <span class="text-success font-weight-bold">Paid:</span>
           <span class="text-success font-monospace">Rs. <?= number_format($paid, 2) ?></span>
         </div>
         <div class="totals-row totals-due">
-          <span>Balance Due:</span>
-          <span class="font-monospace">Rs. <?= number_format($balance_due, 2) ?></span>
+          <span>Invoice Balance:</span>
+          <span class="font-monospace">Rs. <?= number_format($inv_balance, 2) ?></span>
         </div>
       </div>
     </div>
@@ -450,21 +456,6 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
     (<?= htmlspecialchars($company['address']) ?>) under the name of <?= htmlspecialchars($company['name']) ?>,
     being authorized distributors of the manufacturers/principals, do hereby give this warranty that the drugs herein above
     described as sold by me and contained in this invoice do not contravene in any way the provisions of Section 23 of the Drugs Act, 1976.</p>
-
-    <p>______</p>
-
-    <p><strong>Warranty under Alternative Medicines and Health Products (Enlistment) Rules, 2014 [See Rules 10(3) and (5)]:</strong><br>
-    I/We (<?= htmlspecialchars($company['owner']) ?>), as the authorized distributors/agents and on behalf of the
-    principals/manufacturers/importers, hereby give warranty that the supplied alternative medicines and health products
-    mentioned herein do not contravene any provision of the prevailing DRAP Act, 2012 and rules framed thereunder.</p>
-
-    <div class="note">
-      <strong>Note:</strong><br>
-      1. This warranty does not apply to Unani, Homeopathic, Bio-chemic and general items including syringes, medical disposables (if any mentioned in the invoice).<br>
-      2. For near expiry items, we must be informed 6 months prior to expiry.<br>
-      3. Ensure that you have received the stock according to printed quantities and values.<br>
-      4. In case of any discrepancy, please inform us immediately.
-    </div>
 
     <!-- Signature bottom-right -->
     <div class="warranty-sig-row">
