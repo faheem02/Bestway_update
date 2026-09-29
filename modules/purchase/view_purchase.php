@@ -32,7 +32,10 @@ if ($db_connected && $pdo && $purchase_id > 0) {
 
             // Fetch items
             $stmt_i = $pdo->prepare("
-                SELECT pi.*, pr.name as product_name, pr.product_code, pr.stock_unit, pr.packs_per_box, c.name as company_name
+                SELECT pi.*, 
+                       pr.name as product_name, pr.product_code, pr.stock_unit, pr.packs_per_box, 
+                       pr.trade_price as prod_trade_price, pr.discount_percent as prod_discount_percent,
+                       c.name as company_name
                 FROM purchase_items pi
                 LEFT JOIN products pr ON pi.product_id = pr.id
                 LEFT JOIN companies c ON pr.company_id = c.id
@@ -45,7 +48,8 @@ if ($db_connected && $pdo && $purchase_id > 0) {
             // Calculate gross amount and total discounts received (Bonus + Disc + Bill Disc)
             $gross_sum = 0;
             foreach ($items as $it) {
-                $gross_sum += ($it['quantity'] * $it['purchase_price']);
+                $tp_base = floatval($it['purchase_price'] > 0 ? $it['purchase_price'] : ($it['trade_price'] > 0 ? $it['trade_price'] : ($it['prod_trade_price'] ?? 0)));
+                $gross_sum += ($it['quantity'] * $tp_base);
             }
             $subtotal_val = floatval($purchase['subtotal'] ?? 0);
             $row_disc_total = max(0, $gross_sum - $subtotal_val);
@@ -247,19 +251,32 @@ if (!$purchase) {
             <table class="table align-middle">
                 <thead>
                     <tr>
-                        <th style="width: 50px;">#</th>
-                        <th>Medicine / Brand Name</th>
+                        <th style="width: 45px;">#</th>
+                        <th>Medicine / Product Name</th>
                         <th class="text-center">Inward Qty</th>
                         <th class="text-center">Bonus</th>
-                        <th class="text-end">Cost (&lt; TP)</th>
-                        <th class="text-end">Official TP</th>
-                        <th class="text-center">Disc %</th>
+                        <th class="text-end">Trade Price (TP)</th>
+                        <th class="text-center text-success">TP Disc %</th>
+                        <th class="text-center text-primary">Sale Disc %</th>
+                        <th class="text-end text-primary">Sale Rate</th>
                         <th class="text-center">GST %</th>
                         <th class="text-end">Total (Rs.)</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <?php $idx = 1; foreach ($items as $item): ?>
+                    <?php $idx = 1; foreach ($items as $item): 
+                        $tp_val = floatval($item['purchase_price'] > 0 ? $item['purchase_price'] : ($item['trade_price'] > 0 ? $item['trade_price'] : ($item['prod_trade_price'] ?? 0)));
+                        $tp_disc = floatval($item['discount_percent'] ?? 0);
+                        $sale_disc = floatval($item['sale_discount_percent'] ?? 0);
+                        if ($sale_disc <= 0 && !empty($item['prod_discount_percent'])) {
+                            $sale_disc = floatval($item['prod_discount_percent']);
+                        }
+                        $sale_rate = floatval($item['retail_price'] ?? 0);
+                        if ($sale_rate <= 0 && $tp_val > 0) {
+                            $sale_rate = max(0, $tp_val * (1 - ($sale_disc / 100)));
+                        }
+                        $net_cost = max(0, $tp_val * (1 - ($tp_disc / 100)));
+                    ?>
                         <tr>
                             <td><?= $idx++ ?></td>
                             <td>
@@ -271,20 +288,37 @@ if (!$purchase) {
                                 <span class="fw-bold text-dark"><?= number_format($item['quantity']) ?></span>
                                 <span class="text-muted small">Pcs</span>
                             </td>
-                            <td class="text-center fw-bold">
-                                <?= intval($item['bonus_quantity'] ?? 0) ?>
+                            <td class="text-center">
+                                <?php if (!empty($item['bonus_quantity']) && $item['bonus_quantity'] > 0): ?>
+                                    <span class="text-info font-weight-bold">+<?= intval($item['bonus_quantity']) ?></span>
+                                    <div class="text-muted" style="font-size: 0.70rem;">Total <?= number_format($item['quantity'] + $item['bonus_quantity']) ?></div>
+                                <?php else: ?>
+                                    <span class="text-muted">-</span>
+                                <?php endif; ?>
                             </td>
-                            <td class="text-end font-monospace text-danger fw-bold">
-                                Rs. <?= number_format($item['purchase_price'], 2) ?>
-                            </td>
-                            <td class="text-end font-monospace text-primary">
-                                Rs. <?= number_format($item['trade_price'], 2) ?>
+                            <td class="text-end font-monospace fw-bold text-dark">
+                                Rs. <?= number_format($tp_val, 2) ?>
                             </td>
                             <td class="text-center">
-                                <?= ($item['discount_percent'] > 0) ? number_format($item['discount_percent'], 1) . '%' : '-' ?>
+                                <?php if ($tp_disc > 0): ?>
+                                    <span class="text-success font-weight-bold"><?= number_format($tp_disc, 1) ?>%</span>
+                                    <div class="text-muted" style="font-size: 0.70rem;">Net: <?= number_format($net_cost, 2) ?></div>
+                                <?php else: ?>
+                                    <span class="text-muted">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="text-center">
+                                <?php if ($sale_disc > 0): ?>
+                                    <span class="text-primary font-weight-bold"><?= number_format($sale_disc, 1) ?>%</span>
+                                <?php else: ?>
+                                    <span class="text-muted">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="text-end font-monospace text-primary fw-bold">
+                                Rs. <?= number_format($sale_rate, 2) ?>
                             </td>
                             <td class="text-center font-monospace">
-                                <?= (($item['tax_percent'] ?? 0) > 0) ? '<span class="text-primary fw-bold">' . number_format($item['tax_percent'], 1) . '%</span>' : '-' ?>
+                                <?= (($item['tax_percent'] ?? 0) > 0) ? '<span class="text-primary fw-bold">' . number_format($item['tax_percent'], 1) . '%</span>' : '<span class="text-muted small">-</span>' ?>
                             </td>
                             <td class="text-end font-monospace fw-bold text-dark">
                                 Rs. <?= number_format($item['total_price'], 2) ?>

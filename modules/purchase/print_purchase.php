@@ -26,7 +26,10 @@ if ($db_connected && $pdo && $purchase_id > 0) {
             $supplier = $stmt_s->fetch();
 
             $stmt_i = $pdo->prepare("
-                SELECT pi.*, pr.name as product_name, pr.product_code, pr.stock_unit, c.name as company_name
+                SELECT pi.*, 
+                       pr.name as product_name, pr.product_code, pr.stock_unit, pr.packs_per_box, 
+                       pr.trade_price as prod_trade_price, pr.discount_percent as prod_discount_percent,
+                       c.name as company_name
                 FROM purchase_items pi
                 LEFT JOIN products pr ON pi.product_id = pr.id
                 LEFT JOIN companies c ON pr.company_id = c.id
@@ -477,20 +480,26 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                     <th style="width:28px;">#</th>
                     <th>Item / Medicine Description</th>
                     <th style="width:65px;" class="text-center">Qty</th>
-                    <th style="width:130px;" class="text-center">Bonus, Disc & Tax</th>
-                    <th style="width:90px;" class="text-end">Cost/Rate</th>
-                    <th style="width:90px;" class="text-end">TP Ref</th>
+                    <th style="width:170px;" class="text-center">Bonus, TP Disc & Sale Disc</th>
+                    <th style="width:90px;" class="text-end">TP Rate</th>
+                    <th style="width:90px;" class="text-end">Sale Rate</th>
                     <th style="width:100px;" class="text-end">Total (Rs.)</th>
                 </tr>
             </thead>
             <tbody>
                 <?php $i = 1; foreach ($items as $item):
-                    $bonus_pct = floatval($item['bonus_quantity']  ?? 0);
+                    $bonus_qty = intval($item['bonus_quantity']  ?? 0);
                     $disc_pct  = floatval($item['discount_percent'] ?? 0);
+                    $sale_disc = floatval($item['sale_discount_percent'] ?? 0);
+                    if ($sale_disc <= 0 && !empty($item['prod_discount_percent'])) {
+                        $sale_disc = floatval($item['prod_discount_percent']);
+                    }
                     $tax_p     = floatval($item['tax_percent']      ?? 0);
-                    $disc_a    = floatval($item['discount_amount']  ?? 0);
-                    $gross_row = $item['quantity'] * $item['purchase_price'];
-                    $bonus_amt = $gross_row * ($bonus_pct / 100);
+                    $tp_val    = floatval($item['purchase_price'] > 0 ? $item['purchase_price'] : ($item['trade_price'] > 0 ? $item['trade_price'] : ($item['prod_trade_price'] ?? 0)));
+                    $sale_rate = floatval($item['retail_price'] ?? 0);
+                    if ($sale_rate <= 0 && $tp_val > 0) {
+                        $sale_rate = max(0, $tp_val * (1 - ($sale_disc / 100)));
+                    }
                 ?>
                 <tr>
                     <td><?= $i++ ?></td>
@@ -502,22 +511,25 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                     </td>
                     <td class="text-center fw-bold"><?= $item['quantity'] ?></td>
                     <td class="text-center">
-                        <?php if ($bonus_pct > 0): ?>
-                            <span class="bonus-badge">Bonus <?= number_format($bonus_pct, 0) ?>% (-<?= number_format($bonus_amt, 2) ?>)</span>
+                        <?php if ($bonus_qty > 0): ?>
+                            <span class="bonus-badge">Bonus: +<?= $bonus_qty ?></span>
                         <?php endif; ?>
                         <?php if ($disc_pct > 0): ?>
-                            <span class="disc-badge">Disc <?= number_format($disc_pct, 0) ?>%</span>
+                            <span class="disc-badge" title="TP Discount from supplier">TP Disc <?= number_format($disc_pct, 1) ?>%</span>
+                        <?php endif; ?>
+                        <?php if ($sale_disc > 0): ?>
+                            <span class="badge" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:5px;padding:1px 6px;font-size:0.68rem;font-weight:700;">Sale Disc <?= number_format($sale_disc, 1) ?>%</span>
                         <?php endif; ?>
                         <?php if ($tax_p > 0): ?>
-                            <span class="badge" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:5px;padding:1px 6px;font-size:0.68rem;font-weight:700;">GST <?= number_format($tax_p, 0) ?>%</span>
+                            <span class="badge" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca;border-radius:5px;padding:1px 6px;font-size:0.68rem;font-weight:700;">GST <?= number_format($tax_p, 0) ?>%</span>
                         <?php endif; ?>
-                        <?php if ($bonus_pct == 0 && $disc_pct == 0 && $tax_p == 0): ?>
+                        <?php if ($bonus_qty == 0 && $disc_pct == 0 && $sale_disc == 0 && $tax_p == 0): ?>
                             <span class="text-muted" style="font-size:0.75rem;">—</span>
                         <?php endif; ?>
                     </td>
-                    <td class="text-end font-monospace"><?= number_format($item['purchase_price'], 2) ?></td>
-                    <td class="text-end font-monospace text-muted"><?= number_format($item['trade_price'], 2) ?></td>
-                    <td class="text-end font-monospace fw-bold"><?= number_format($item['total_price'], 2) ?></td>
+                    <td class="text-end font-monospace fw-bold">Rs. <?= number_format($tp_val, 2) ?></td>
+                    <td class="text-end font-monospace text-primary">Rs. <?= number_format($sale_rate, 2) ?></td>
+                    <td class="text-end font-monospace fw-bold">Rs. <?= number_format($item['total_price'], 2) ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>

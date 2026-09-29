@@ -96,9 +96,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
     $company_id       = !empty($_POST['company_id']) ? intval($_POST['company_id']) : null;
     $category_id      = !empty($_POST['category_id']) ? intval($_POST['category_id']) : null;
     $trade_price      = floatval($_POST['trade_price'] ?? 0);
-    $wholesale_price  = $trade_price;
+    $discount_percent = floatval($_POST['discount_percent'] ?? 0);
+    $retail_price     = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
+    $wholesale_price  = $retail_price;
     $purchase_price   = $trade_price;
-    $retail_price     = $trade_price;
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
     $opening_stock    = intval($_POST['opening_stock'] ?? 0);
     $location_rack    = trim($_POST['location_rack'] ?? '');
@@ -139,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
                         ?, NULL, ?, NULL, ?, ?,
                         NULL, ?, ?, ?, ?, ?,
                         ?, ?, ?,
-                        ?, 0, 0,
+                        ?, ?, ?,
                         ?, ?, ?, ?,
                         0, 0, ?
                     )
@@ -160,6 +161,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
                     $trade_price,
                     $retail_price,
                     $wholesale_price,
+                    $discount_percent,
+                    $discount_percent,
                     $reorder_level,
                     $opening_stock,
                     $current_stock,
@@ -319,8 +322,27 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <!-- Trade Price / TP Rate (only price field) -->
         <div class="col-md-4 mb-3">
           <label class="form-label font-weight-bold">Trade Price / TP Rate (Rs.) <span class="text-danger">*</span></label>
-          <input type="number" step="0.01" min="0" name="trade_price" id="trade_price" class="form-control text-right font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" required>
+          <input type="number" step="0.01" min="0" name="trade_price" id="trade_price" class="form-control text-right font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" oninput="calcProductSaleRate()" required>
           <small class="text-muted">Company official TP rate</small>
+        </div>
+
+        <!-- Sale Discount % -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Sale Discount (%)</label>
+          <div class="input-group">
+            <input type="number" step="0.01" min="0" max="100" name="discount_percent" id="discount_percent" class="form-control text-right font-weight-bold text-success" placeholder="0.00" value="0.00" onfocus="this.select()" oninput="calcProductSaleRate()">
+            <div class="input-group-append">
+              <span class="input-group-text font-weight-bold bg-light text-success">%</span>
+            </div>
+          </div>
+          <small class="text-muted">Default sale discount on TP for Sale & Purchase</small>
+        </div>
+
+        <!-- Calculated Sale Price Preview -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Net Sale Price (Rs.)</label>
+          <input type="text" id="preview_sale_price" class="form-control text-right font-weight-bold bg-light text-dark" placeholder="0.00" readonly>
+          <small class="text-muted">Calculated: TP minus Sale Discount</small>
         </div>
 
         <!-- Opening Stock (Pieces) -->
@@ -347,7 +369,7 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <!-- Status -->
         <div class="col-md-4 mb-3">
           <label class="form-label font-weight-bold">Status</label>
-          <select name="status" class="form-control">
+          <select name="status" class="form-control font-weight-bold">
             <option value="Active" selected>Active</option>
             <option value="Inactive">Inactive</option>
           </select>
@@ -527,7 +549,19 @@ document.addEventListener('DOMContentLoaded', function() {
             e.target.select();
         }
     }, true);
+
+    calcProductSaleRate();
 });
+
+function calcProductSaleRate() {
+    const tp = parseFloat(document.getElementById('trade_price')?.value) || 0;
+    const disc = parseFloat(document.getElementById('discount_percent')?.value) || 0;
+    const netSale = tp > 0 ? (tp * (1 - (disc / 100))) : 0;
+    const prev = document.getElementById('preview_sale_price');
+    if (prev) {
+        prev.value = netSale > 0 ? netSale.toFixed(2) : (tp > 0 ? tp.toFixed(2) : '0.00');
+    }
+}
 </script>
 
 <?php require_once dirname(__DIR__, 2) . '/includes/footer.php'; ?>

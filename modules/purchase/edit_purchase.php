@@ -124,8 +124,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     INSERT INTO purchase_items (
                         purchase_id, product_id, batch_no, expiry_date,
                         quantity, bonus_quantity, purchase_price, trade_price,
-                        retail_price, discount_percent, discount_amount, tax_percent, tax_amount, total_price
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        retail_price, discount_percent, sale_discount_percent, discount_amount, tax_percent, tax_amount, total_price
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
 
                 $stmt_add_stock = $pdo->prepare("
@@ -148,14 +148,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     $final_bonus = $bonus_qty;
                     $total_stock = $final_qty + $final_bonus;
 
-                    $p_cost      = floatval($itm['purchase_price'] ?? 0);
-                    $tp_rate     = floatval($itm['trade_price'] ?? 0);
-                    $disc_pct    = floatval($itm['discount_percent'] ?? 0);
-                    $disc_amt    = floatval($itm['discount_amount'] ?? 0);
-                    $tax_pct     = floatval($itm['tax_percent'] ?? 0);
-                    $tax_amt     = floatval($itm['tax_amount'] ?? 0);
-                    $gross_row   = $raw_qty * $p_cost;
-                    $net_bef_tax = max(0, $gross_row - $disc_amt);
+                    $p_cost        = floatval($itm['purchase_price'] ?? 0);
+                    $tp_rate       = floatval($itm['trade_price'] ?? 0);
+                    $disc_pct      = floatval($itm['discount_percent'] ?? 0);
+                    $sale_disc_pct = floatval($itm['sale_discount_percent'] ?? 0);
+                    $disc_amt      = floatval($itm['discount_amount'] ?? 0);
+                    $tax_pct       = floatval($itm['tax_percent'] ?? 0);
+                    $tax_amt       = floatval($itm['tax_amount'] ?? 0);
+                    $gross_row     = $raw_qty * $p_cost;
+                    $net_bef_tax   = max(0, $gross_row - $disc_amt);
                     if ($tax_amt <= 0 && $tax_pct > 0) {
                         $tax_amt = round($net_bef_tax * ($tax_pct / 100), 2);
                     }
@@ -172,7 +173,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
                             $final_qty, $final_bonus, $net_unit_cost, $tp_rate,
-                            $tp_rate, $disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
+                            $tp_rate, $disc_pct, $sale_disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
                         $stmt_add_stock->execute([$total_stock, $base_pack_cost, $base_pack_tp, $pid]);

@@ -237,15 +237,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     INSERT INTO purchase_items (
                         purchase_id, product_id, batch_no, expiry_date,
                         quantity, raw_quantity, unit_type, bonus_quantity, purchase_price, trade_price,
-                        retail_price, discount_percent, discount_amount, tax_percent, tax_amount, total_price
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        retail_price, discount_percent, sale_discount_percent, discount_amount, tax_percent, tax_amount, total_price
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
 
                 $stmt_stock = $pdo->prepare("
                     UPDATE products 
                     SET current_stock = current_stock + ?, 
                         purchase_price = ?,
-                        discount_percent = CASE WHEN ? > 0 THEN ? ELSE discount_percent END,
+                        discount_percent = CASE WHEN ? = 1 THEN ? ELSE discount_percent END,
                         retail_price = CASE WHEN ? > 0 THEN ? ELSE retail_price END
                     WHERE id = ?
                 ");
@@ -287,7 +287,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     $p_cost         = floatval($itm['purchase_price'] ?? 0);
                     // tp_ JS field is updated to calcSalePrice when user sets Sale Discount %; use it if available
                     $form_tp        = floatval($itm['trade_price'] ?? 0);
-                    $sale_disc_pct  = floatval($itm['sale_discount_percent'] ?? 0);
+                    $has_sale_disc  = isset($itm['sale_discount_percent']) && trim((string)$itm['sale_discount_percent']) !== '';
+                    $sale_disc_pct  = $has_sale_disc ? floatval($itm['sale_discount_percent']) : 0;
                     $sale_price     = floatval($itm['sale_price'] ?? 0);
                     // Determine the Trade Price to store (selling rate):
                     // Priority: explicit sale_price > form trade_price > p_cost*(1-sale_disc%) > p_cost
@@ -327,8 +328,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         // Insert Item Record
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
-                            $raw_qty, $raw_qty, 'Pcs', $raw_bonus, $p_cost, $tp_rate,
-                            $sale_price, $disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
+                            $raw_qty, $raw_qty, 'Pcs', $raw_bonus, $p_cost, $p_cost,
+                            $sale_price, $disc_pct, $sale_disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
                         // Update Product Main Stock & Rates: add all_total_stock (purchased + bonus)
@@ -336,7 +337,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         $stmt_stock->execute([
                             $all_total_stock, 
                             $net_unit_cost, 
-                            $sale_disc_pct, $sale_disc_pct, 
+                            $has_sale_disc ? 1 : 0, $sale_disc_pct, 
                             $sale_price, $sale_price, 
                             $pid
                         ]);
@@ -743,11 +744,11 @@ if ($db_connected && $pdo) {
                             <th style="width: 75px;" class="text-center">Qty</th>
                             <th style="width: 70px;" class="text-center">Bonus</th>
                             <th style="width: 70px;" class="text-center">Total Qty</th>
-                            <th style="width: 105px;" class="text-right">TP / Cost</th>
-                            <th style="width: 75px;" class="text-center">Disc %</th>
+                            <th style="width: 105px;" class="text-right">TP Rate (Rs.)</th>
+                            <th style="width: 80px;" class="text-center text-success">TP Disc %</th>
                             <th style="width: 75px;" class="text-center">GST %</th>
                             <th style="width: 110px;" class="text-right">Total (Rs.)</th>
-                            <th style="width: 95px;" class="text-center text-success">TP Disc %</th>
+                            <th style="width: 95px;" class="text-center text-success">Total Benefit %</th>
                             <th style="width: 115px;" class="text-center text-primary">Sale Disc %</th>
                             <th style="width: 40px;" class="text-center"></th>
                         </tr>
@@ -1206,9 +1207,12 @@ function renderProductList(rowId, items, query) {
                         <strong class="text-dark">${nameHl}</strong>
                         <span class="badge bg-light text-primary border ms-1">${codeHl}</span>
                     </div>
-                    <span class="badge bg-success-subtle text-success">
-                        TP: Rs. ${tp.toFixed(2)}
-                    </span>
+                    <div class="text-end">
+                        <span class="badge bg-success-subtle text-success">
+                            TP: Rs. ${tp.toFixed(2)}
+                        </span>
+                        ${parseFloat(p.discount_percent || 0) > 0 ? `<div class="badge bg-primary-subtle text-primary border border-primary-subtle mt-1" style="font-size: 0.70rem;">Sale Disc: ${parseFloat(p.discount_percent).toFixed(1)}%</div>` : ''}
+                    </div>
                 </div>
                 <div class="small text-muted d-flex justify-content-between align-items-center mt-1">
                     <span><i class="fa-solid fa-industry me-1"></i>${compHl}</span>
@@ -1243,7 +1247,7 @@ function selectProductItem(rowId, p) {
     document.getElementById('tp_' + rowId).value   = (baseTp > 0) ? baseTp.toFixed(2) : '';
 
     // If product has default sale discount in catalog, populate it
-    const defSaleDisc = parseFloat(product.discount_percent || 0);
+    const defSaleDisc = parseFloat(p.discount_percent || 0);
     const saleDiscEl = document.getElementById('saleDiscPct_' + rowId);
     if (saleDiscEl) {
         saleDiscEl.value = (defSaleDisc > 0) ? defSaleDisc.toFixed(2) : '';
@@ -1513,9 +1517,9 @@ function addNewItemRow() {
             <input type="number" step="0.01" min="0" name="items[${rowCounter}][purchase_price]" id="cost_${rowCounter}" class="form-control text-right font-weight-bold" placeholder="0.00" value="" onfocus="this.select()" required oninput="onCostChange(${rowCounter})">
         </td>
 
-        <!-- 5. Discount % -->
-        <td style="width: 75px;">
-            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold" placeholder="0.00" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
+        <!-- 5. TP Discount % -->
+        <td style="width: 80px;">
+            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold text-success" placeholder="0.00" value="" title="TP Discount % (Supplier Disc)" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][discount_amount]" id="discAmt_${rowCounter}" value="0.00">
             <div id="discAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>

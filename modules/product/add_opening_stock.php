@@ -50,13 +50,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_stock'])) {
                     $expiry_date = date('Y-m-d', strtotime('+2 years'));
                 }
                 if ($trade_rate <= 0) {
-                    $trade_rate = floatval($prod['trade_price'] ?? 0);
+                    $trade_rate = floatval($prod['trade_price'] > 0 ? $prod['trade_price'] : ($prod['purchase_price'] ?? 0));
                 }
-                if ($purchase_rate <= 0) {
-                    $purchase_rate = floatval($prod['purchase_price'] ?? 0);
-                }
-
-                $total_val = $packs_to_add * ($purchase_rate > 0 ? $purchase_rate : $trade_rate);
+                $purchase_rate = $trade_rate;
+                $total_val = $packs_to_add * $trade_rate;
 
                 $pdo->beginTransaction();
 
@@ -259,15 +256,10 @@ if ($db_connected && $pdo) {
                         </div>
                     </div>
 
-                    <div class="row g-2 mb-3">
-                        <div class="col-6">
-                            <label class="form-label small fw-bold text-dark">Purchase Cost (Rs.)</label>
-                            <input type="number" step="0.01" min="0" name="purchase_rate" id="costInput" class="form-control text-end fw-semibold" placeholder="0.00">
-                        </div>
-                        <div class="col-6">
-                            <label class="form-label small fw-bold text-dark">Trade Price (TP)</label>
-                            <input type="number" step="0.01" min="0" name="trade_rate" id="tpInput" class="form-control text-end fw-semibold" placeholder="0.00">
-                        </div>
+                    <div class="mb-3">
+                        <label class="form-label small fw-bold text-dark">Trade Price / TP Rate (Rs.)</label>
+                        <input type="number" step="0.01" min="0" name="trade_rate" id="tpInput" class="form-control text-end fw-semibold" placeholder="0.00" oninput="if(document.getElementById('costInput')) document.getElementById('costInput').value = this.value;">
+                        <input type="hidden" name="purchase_rate" id="costInput" value="0.00">
                     </div>
 
                     <div class="mb-4">
@@ -373,8 +365,9 @@ if ($db_connected && $pdo) {
         formulaText.textContent = `1 Box = ${pbox} Packs = ${pbox * tpack} Tablets / Pieces`;
         currStockBadge.textContent = `Current Stock: ${stock} Packs`;
 
-        if (cost > 0) costInput.value = parseFloat(cost).toFixed(2);
-        if (tp > 0) tpInput.value = parseFloat(tp).toFixed(2);
+        const tpVal = tp > 0 ? parseFloat(tp).toFixed(2) : (cost > 0 ? parseFloat(cost).toFixed(2) : '');
+        if (tpInput) tpInput.value = tpVal;
+        if (costInput) costInput.value = tpVal;
     }
 
     prodSelect.addEventListener('change', syncProductDetails);

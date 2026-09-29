@@ -41,15 +41,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
     $name             = trim($_POST['name'] ?? '');
     $company_id       = !empty($_POST['company_id']) ? intval($_POST['company_id']) : null;
     $category_id      = !empty($_POST['category_id']) ? intval($_POST['category_id']) : null;
-    $purchase_price   = floatval($_POST['purchase_price'] ?? 0);
     $trade_price      = floatval($_POST['trade_price'] ?? 0);
+    $purchase_price   = $trade_price; // TP rate IS the purchase rate
+    $discount_percent = floatval($_POST['discount_percent'] ?? 0);
+    $calc_sale_price  = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
     $wholesale_price  = floatval($_POST['wholesale_price'] ?? 0);
     if ($wholesale_price <= 0 && $trade_price > 0) {
-        $wholesale_price = $trade_price;
+        $wholesale_price = $calc_sale_price;
     }
-    $retail_price     = floatval($_POST['retail_price'] ?? $trade_price);
+    $retail_price     = floatval($_POST['retail_price'] ?? $wholesale_price);
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
-    $location_rack    = trim($_POST['location_rack'] ?? '');
     $status           = in_array($_POST['status'] ?? '', ['Active', 'Inactive']) ? $_POST['status'] : 'Active';
 
     if (empty($name)) {
@@ -69,13 +70,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                     UPDATE products SET 
                         product_code = ?, name = ?, company_id = ?, category_id = ?,
                         purchase_price = ?, trade_price = ?, retail_price = ?, wholesale_price = ?,
-                        reorder_level = ?, location_rack = ?, status = ?
+                        discount_percent = ?, max_discount_percent = ?,
+                        reorder_level = ?, status = ?
                     WHERE id = ?
                 ");
                 $stmt->execute([
                     $product_code, $name, $company_id, $category_id,
                     $purchase_price, $trade_price, $retail_price, $wholesale_price,
-                    $reorder_level, $location_rack ?: null, $status, $product_id
+                    $discount_percent, $discount_percent,
+                    $reorder_level, $status, $product_id
                 ]);
 
                 $message = "Product '{$name}' updated successfully!";
@@ -176,21 +179,26 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <!-- Trade Price / TP (First) -->
         <div class="col-md-4 mb-3">
           <label class="form-label font-weight-bold">Trade Price / TP Rate (Rs.) <span class="text-danger">*</span></label>
-          <input type="number" step="0.01" min="0" name="trade_price" class="form-control text-right font-weight-bold text-primary" value="<?= htmlspecialchars($prod['trade_price']) ?>" required>
+          <input type="number" step="0.01" min="0" name="trade_price" id="trade_price" class="form-control text-right font-weight-bold text-primary" value="<?= htmlspecialchars($prod['trade_price']) ?>" required oninput="calcEditSaleRate()">
           <small class="text-muted">Company official TP rate</small>
         </div>
 
-        <!-- Purchase Rate / Cost (Second) -->
+        <!-- Sale Discount % -->
         <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Purchase Rate / Cost (Rs.)</label>
-          <input type="number" step="0.01" min="0" name="purchase_price" class="form-control text-right font-weight-bold text-dark" value="<?= htmlspecialchars($prod['purchase_price']) ?>">
-          <small class="text-muted">Cost price from supplier</small>
+          <label class="form-label font-weight-bold">Sale Discount (%)</label>
+          <div class="input-group">
+            <input type="number" step="0.01" min="0" max="100" name="discount_percent" id="discount_percent" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['discount_percent'] ?? '0.00') ?>" onfocus="this.select()" oninput="calcEditSaleRate()">
+            <div class="input-group-append">
+              <span class="input-group-text font-weight-bold bg-light text-success">%</span>
+            </div>
+          </div>
+          <small class="text-muted">Default customer discount on TP</small>
         </div>
 
-        <!-- Sale Rate (Third) -->
+        <!-- Sale Rate (Second) -->
         <div class="col-md-4 mb-3">
           <label class="form-label font-weight-bold">Sale Rate (Rs.)</label>
-          <input type="number" step="0.01" min="0" name="wholesale_price" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : $prod['trade_price']) ?>">
+          <input type="number" step="0.01" min="0" name="wholesale_price" id="wholesale_price" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : ($prod['retail_price'] > 0 ? $prod['retail_price'] : $prod['trade_price'])) ?>">
           <small class="text-muted">Store selling rate to customers</small>
         </div>
 
@@ -206,13 +214,6 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           <label class="form-label font-weight-bold">Low Stock Alert (Pcs)</label>
           <input type="number" min="0" name="reorder_level" class="form-control text-center" value="<?= htmlspecialchars($prod['reorder_level'] ?? 10) ?>">
           <small class="text-muted">Alert when stock falls below this</small>
-        </div>
-
-        <!-- Shelf / Rack Location -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Rack / Shelf Location</label>
-          <input type="text" name="location_rack" class="form-control" value="<?= htmlspecialchars($prod['location_rack'] ?? '') ?>" placeholder="e.g. Shelf A-1, Rack 3">
-          <small class="text-muted">Optional godown/store location</small>
         </div>
 
         <!-- Status -->
@@ -241,6 +242,16 @@ document.addEventListener('focus', function(e) {
         e.target.select();
     }
 }, true);
+
+function calcEditSaleRate() {
+    const tp = parseFloat(document.getElementById('trade_price')?.value) || 0;
+    const disc = parseFloat(document.getElementById('discount_percent')?.value) || 0;
+    const netSale = tp > 0 ? (tp * (1 - (disc / 100))) : 0;
+    const saleInput = document.getElementById('wholesale_price');
+    if (saleInput) {
+        saleInput.value = netSale > 0 ? netSale.toFixed(2) : (tp > 0 ? tp.toFixed(2) : '0.00');
+    }
+}
 </script>
 
 <?php require_once dirname(__DIR__, 2) . '/includes/footer.php'; ?>

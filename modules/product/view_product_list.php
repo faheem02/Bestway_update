@@ -85,7 +85,7 @@ if ($db_connected && $pdo) {
         $kpi = $pdo->query("
             SELECT 
                 COUNT(*) as total_items,
-                SUM(current_stock * purchase_price) as total_val,
+                SUM(current_stock * COALESCE(NULLIF(trade_price, 0), purchase_price, 0)) as total_val,
                 SUM(CASE WHEN current_stock <= reorder_level AND current_stock > 0 THEN 1 ELSE 0 END) as low_cnt,
                 SUM(CASE WHEN current_stock <= 0 THEN 1 ELSE 0 END) as out_cnt
             FROM products
@@ -369,7 +369,7 @@ if ($db_connected && $pdo) {
                 <i class="fa-solid fa-university"></i>
             </div>
             <div>
-                <span class="text-muted small fw-semibold text-uppercase" style="letter-spacing: 0.5px;">Stock Value (Cost)</span>
+                <span class="text-muted small fw-semibold text-uppercase" style="letter-spacing: 0.5px;">Stock Value (TP)</span>
                 <h4 class="fw-bold mb-0 text-success">Rs. <?= number_format($total_inventory_cost, 2) ?></h4>
             </div>
         </div>
@@ -516,6 +516,11 @@ if ($db_connected && $pdo) {
                             <td class="text-end">
                                 <div class="fw-bold text-primary font-monospace">Rs. <?= number_format($tp, 2) ?></div>
                                 <div class="small text-muted font-monospace">Sale: Rs. <?= number_format($sale, 2) ?></div>
+                                <?php if (floatval($p['discount_percent'] ?? 0) > 0): ?>
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle mt-1" style="font-size: 0.70rem;">
+                                        <?= floatval($p['discount_percent']) ?>% Disc
+                                    </span>
+                                <?php endif; ?>
                             </td>
 
                             <td class="text-center">
@@ -548,10 +553,9 @@ if ($db_connected && $pdo) {
                                                 "p_box" => $p_box,
                                                 "t_pack" => $t_pack,
                                                 "tot_tabs" => $tot_tabs,
-                                                "cost" => $cost,
                                                 "tp" => $tp,
+                                                "disc" => floatval($p["discount_percent"] ?? 0),
                                                 "sale" => $sale,
-                                                "profit" => $profit_pack,
                                                 "stock" => $cur_stock,
                                                 "stock_boxes" => number_format($stock_boxes, 1),
                                                 "stock_tabs" => number_format($stock_tabs),
@@ -610,19 +614,19 @@ if ($db_connected && $pdo) {
                 <!-- Pricing Card -->
                 <div class="card border-0 shadow-sm rounded-3 p-3 mb-3 bg-white">
                     <div class="fw-bold text-dark mb-2 d-flex align-items-center gap-2">
-                        <i class="fa-solid fa-money-bill-alt text-success"></i> Pricing Details
+                        <i class="fa-solid fa-money-bill-alt text-success"></i> Pricing & Rate Details
                     </div>
                     <div class="row g-2 text-center">
                         <div class="col-4">
                             <div class="p-2 rounded-2 bg-light border">
-                                <span class="text-muted small d-block">Purchase Cost</span>
-                                <span class="fw-bold text-danger fs-6" id="vCost">Rs. 0.00</span>
+                                <span class="text-muted small d-block">Trade Price / TP</span>
+                                <span class="fw-bold text-primary fs-6" id="vTp">Rs. 0.00</span>
                             </div>
                         </div>
                         <div class="col-4">
                             <div class="p-2 rounded-2 bg-light border">
-                                <span class="text-muted small d-block">Official TP</span>
-                                <span class="fw-bold text-primary fs-6" id="vTp">Rs. 0.00</span>
+                                <span class="text-muted small d-block">Sale Discount</span>
+                                <span class="fw-bold text-info fs-6" id="vDisc">0.00%</span>
                             </div>
                         </div>
                         <div class="col-4">
@@ -661,51 +665,19 @@ if ($db_connected && $pdo) {
 
 <script>
 function showProductModal(p) {
-    const profit = parseFloat(p.profit) || 0;
     document.getElementById('vProdCode').textContent = p.code || 'PRD-0000';
     document.getElementById('vProdName').textContent = p.name || '';
     document.getElementById('vProdCompany').textContent = p.company || 'General Pharma';
     document.getElementById('vProdCategory').textContent = p.category || 'General Dosage';
+    if (document.getElementById('vBtnEdit')) document.getElementById('vBtnEdit').href = 'edit_product.php?id=' + p.id;
 
-    const cost = parseFloat(p.cost) || 0;
     const tp   = parseFloat(p.tp) || 0;
-    const sale = parseFloat(p.sale) || 0;
+    const disc = parseFloat(p.disc) || 0;
+    const sale = parseFloat(p.sale) || (tp > 0 ? (tp * (1 - (disc / 100))) : 0);
 
-    if (document.getElementById('vCost')) document.getElementById('vCost').textContent = 'Rs. ' + cost.toFixed(2);
     if (document.getElementById('vTp')) document.getElementById('vTp').textContent = 'Rs. ' + tp.toFixed(2);
+    if (document.getElementById('vDisc')) document.getElementById('vDisc').textContent = disc.toFixed(2) + '%';
     if (document.getElementById('vSale')) document.getElementById('vSale').textContent = 'Rs. ' + sale.toFixed(2);
-    if (document.getElementById('vProfit')) document.getElementById('vProfit').textContent = (profit >= 0 ? '+Rs. ' : '-Rs. ') + Math.abs(profit).toFixed(2);
-
-    if (document.getElementById('vBelowTpTag')) {
-        if (tp > 0 && cost < tp) {
-            const belowTp = (((tp - cost) / tp) * 100).toFixed(1);
-            document.getElementById('vBelowTpTag').textContent = belowTp + '% Below TP';
-            document.getElementById('vBelowTpTag').className = 'text-success small fw-semibold';
-        } else {
-            document.getElementById('vBelowTpTag').textContent = 'At TP or Net Rate';
-            document.getElementById('vBelowTpTag').className = 'text-muted small';
-        }
-    }
-
-    if (document.getElementById('vStoreDiscTag')) {
-        if (tp > 0 && sale < tp) {
-            const storeDisc = (((tp - sale) / tp) * 100).toFixed(1);
-            document.getElementById('vStoreDiscTag').textContent = storeDisc + '% Store Disc';
-        } else if (tp > 0 && sale === tp) {
-            document.getElementById('vStoreDiscTag').textContent = '100% Full TP';
-        } else {
-            document.getElementById('vStoreDiscTag').textContent = 'Standard Rate';
-        }
-    }
-
-    if (document.getElementById('vProfitPct')) {
-        if (cost > 0) {
-            const marginPct = ((profit / cost) * 100).toFixed(1);
-            document.getElementById('vProfitPct').textContent = (profit >= 0 ? '+' : '') + marginPct + '% Margin';
-        } else {
-            document.getElementById('vProfitPct').textContent = '0% Margin';
-        }
-    }
 
     const stock = parseFloat(p.stock) || 0;
     const reorder = parseFloat(p.reorder) || 10;
