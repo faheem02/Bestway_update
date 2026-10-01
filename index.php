@@ -241,24 +241,29 @@ $chart_recovery_values = array_values($recovery_chart_data);
 ?>
 
       <!-- Greeting Bar -->
-      <div class="greet-bar mb-4 d-flex align-items-center justify-content-between flex-wrap">
-        <div>
+      <div class="greet-bar mb-4">
+        <div class="greet-text">
           <h4 class="mb-1">Welcome back, <?= htmlspecialchars($_SESSION['user_fullname'] ?? 'Admin') ?>!</h4>
-          <p class="mb-0 small" style="opacity:0.75;"><?= date('l, d F Y') ?> &mdash; Bestway Distribution Dashboard</p>
+          <p class="mb-3 small" style="opacity:0.75;"><?= date('l, d F Y') ?> &mdash; Bestway Distribution Dashboard</p>
+          <div>
+            <a href="<?= BASE_URL ?>modules/sale/new_sale.php" class="btn btn-light btn-sm mr-2">
+              <i class="fas fa-plus-circle mr-1"></i> New Sale
+            </a>
+            <?php if (isAdmin()): ?>
+            <a href="<?= BASE_URL ?>modules/purchase/add_purchase.php" class="btn btn-light btn-sm">
+              <i class="fas fa-cart-arrow-down mr-1"></i> Add Purchase
+            </a>
+            <?php else: ?>
+            <a href="<?= BASE_URL ?>modules/sale/sales.php" class="btn btn-light btn-sm">
+              <i class="fas fa-file-invoice mr-1"></i> Invoices
+            </a>
+            <?php endif; ?>
+          </div>
         </div>
-        <div class="mt-2 mt-md-0">
-          <a href="<?= BASE_URL ?>modules/sale/new_sale.php" class="btn btn-light btn-sm mr-2">
-            <i class="fas fa-plus-circle mr-1"></i> New Sale
-          </a>
-          <?php if (isAdmin()): ?>
-          <a href="<?= BASE_URL ?>modules/purchase/add_purchase.php" class="btn btn-light btn-sm">
-            <i class="fas fa-cart-arrow-down mr-1"></i> Add Purchase
-          </a>
-          <?php else: ?>
-          <a href="<?= BASE_URL ?>modules/sale/sales.php" class="btn btn-light btn-sm">
-            <i class="fas fa-file-invoice mr-1"></i> Invoices
-          </a>
-          <?php endif; ?>
+        <div class="greet-media">
+          <img src="<?= BASE_URL ?>assets/images/dashboard_hero.jpg"
+               alt="Bestway Distribution"
+               class="greet-hero-img">
         </div>
       </div>
 
@@ -395,13 +400,13 @@ $chart_recovery_values = array_values($recovery_chart_data);
                     <span>View Sales</span>
                   </a>
                 </div>
+                <?php if (isAdmin()): ?>
                 <div class="col-6 col-sm-4 col-md-2 mb-2">
                   <a href="<?= BASE_URL ?>modules/reports/dsr.php" class="chip-chip d-flex flex-column text-center">
                     <i class="fas fa-calendar-check mb-1"></i>
                     <span>DSR Report</span>
                   </a>
                 </div>
-                <?php if (isAdmin()): ?>
                 <div class="col-6 col-sm-4 col-md-2 mb-2">
                   <a href="<?= BASE_URL ?>modules/purchase/add_purchase.php" class="chip-chip d-flex flex-column text-center">
                     <i class="fas fa-cart-arrow-down mb-1"></i>

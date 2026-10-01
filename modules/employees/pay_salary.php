@@ -51,6 +51,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_salesman_stats') {
         'commission_rate' => 0.0,
         'invoice_count' => 0,
         'sales_amount' => 0.0,
+        'returned_amount' => 0.0,
         'commission_earned' => 0.0,
         'paid_amount' => 0.0,
         'balance_due' => 0.0,
@@ -69,12 +70,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_salesman_stats') {
                 $data['employee_type'] = $emp['employee_type'];
                 $data['commission_rate'] = (float)$emp['commission_rate'];
 
-                // Month sales for this salesman
-                $stmt_sales = $pdo->prepare("SELECT COUNT(*) as inv_count, COALESCE(SUM(grand_total), 0) as total_sales FROM sales_invoices WHERE booker_id = ? AND invoice_date BETWEEN ? AND ?");
+                // Month sales for this salesman (net of Good/Resalable returns)
+                $stmt_sales = $pdo->prepare("SELECT COUNT(*) as inv_count, COALESCE(SUM(si.grand_total), 0) as total_sales, COALESCE(SUM(ri.returned), 0) as returned_amount, COALESCE(SUM(GREATEST(0, si.grand_total - COALESCE(ri.returned, 0))), 0) as net_sales FROM sales_invoices si " . getReturnNetJoinSql('si') . " WHERE si.booker_id = ? AND si.invoice_date BETWEEN ? AND ?");
                 $stmt_sales->execute([$emp_id, $from, $to]);
                 $srow = $stmt_sales->fetch(PDO::FETCH_ASSOC);
                 $data['invoice_count'] = (int)($srow['inv_count'] ?? 0);
-                $data['sales_amount'] = (float)($srow['total_sales'] ?? 0.0);
+                $data['sales_amount'] = (float)($srow['net_sales'] ?? 0.0);
+                $data['returned_amount'] = (float)($srow['returned_amount'] ?? 0.0);
 
                 if ($emp['employee_type'] === 'salesman') {
                     $data['commission_earned'] = round($data['sales_amount'] * $data['commission_rate'] / 100, 2);
@@ -114,7 +116,7 @@ if ($employee_id > 0) {
         if ($selected_emp) {
             $from = $month . '-01';
             $to = date('Y-m-t', strtotime($from));
-            $s_stmt = $pdo->prepare("SELECT COUNT(*) as inv_count, COALESCE(SUM(grand_total), 0) as total_sales FROM sales_invoices WHERE booker_id = ? AND invoice_date BETWEEN ? AND ?");
+            $s_stmt = $pdo->prepare("SELECT COUNT(*) as inv_count, COALESCE(SUM(si.grand_total), 0) as total_sales, COALESCE(SUM(ri.returned), 0) as returned_amount, COALESCE(SUM(GREATEST(0, si.grand_total - COALESCE(ri.returned, 0))), 0) as net_sales FROM sales_invoices si " . getReturnNetJoinSql('si') . " WHERE si.booker_id = ? AND si.invoice_date BETWEEN ? AND ?");
             $s_stmt->execute([$employee_id, $from, $to]);
             $s_row = $s_stmt->fetch(PDO::FETCH_ASSOC);
 
@@ -123,7 +125,8 @@ if ($employee_id > 0) {
             $p_row = $p_stmt->fetch(PDO::FETCH_ASSOC);
 
             $inv_cnt = (int)($s_row['inv_count'] ?? 0);
-            $s_amt = (float)($s_row['total_sales'] ?? 0.0);
+            $s_amt = (float)($s_row['net_sales'] ?? 0.0);
+            $ret_amt = (float)($s_row['returned_amount'] ?? 0.0);
             $crate = (float)($selected_emp['commission_rate'] ?? 0.0);
             $c_earned = ($selected_emp['employee_type'] === 'salesman') ? round($s_amt * $crate / 100, 2) : 0.0;
             $p_amt = (float)($p_row['total_paid'] ?? 0.0);
@@ -132,6 +135,7 @@ if ($employee_id > 0) {
             $selected_stats = [
                 'invoice_count' => $inv_cnt,
                 'sales_amount' => $s_amt,
+                'returned_amount' => $ret_amt,
                 'commission_rate' => $crate,
                 'commission_earned' => $c_earned,
                 'paid_amount' => $p_amt,
@@ -286,8 +290,10 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
                   <span class="font-weight-bold text-dark h5 mb-0" id="statInvoices"><?= $selected_stats['invoice_count'] ?? 0 ?></span>
                 </div>
                 <div class="col-6 col-md-3 mb-2">
-                  <small class="text-muted text-uppercase d-block" style="font-size: 0.72rem;">Total Sales (This Month)</small>
+                  <small class="text-muted text-uppercase d-block" style="font-size: 0.72rem;">Net Sales (This Month)</small>
                   <span class="font-weight-bold text-dark h5 mb-0" id="statSales">Rs. <?= number_format($selected_stats['sales_amount'] ?? 0, 2) ?></span>
+                  <?php $pret = (float)($selected_stats['returned_amount'] ?? 0); ?>
+                  <small class="d-block text-danger" id="statReturned"<?= $pret > 0 ? '' : ' style="display:none"' ?>>Returns: -Rs. <?= number_format($pret, 2) ?></small>
                 </div>
                 <div class="col-6 col-md-2 mb-2">
                   <small class="text-muted text-uppercase d-block" style="font-size: 0.72rem;">Commission Rate</small>
@@ -397,6 +403,12 @@ $(document).ready(function(){
         $('#statMonthLabel').text('(' + res.month_label + ')');
         $('#statInvoices').text(res.invoice_count);
         $('#statSales').text('Rs. ' + formatMoney(res.sales_amount));
+        var retAmt = parseFloat(res.returned_amount) || 0;
+        if (retAmt > 0) {
+          $('#statReturned').text('Returns: -Rs. ' + formatMoney(retAmt)).show();
+        } else {
+          $('#statReturned').hide();
+        }
         $('#statRate').text(parseFloat(res.commission_rate).toFixed(2) + '%');
         $('#statEarned').text('Rs. ' + formatMoney(res.commission_earned));
         $('#statPaid').text('Rs. ' + formatMoney(res.paid_amount));

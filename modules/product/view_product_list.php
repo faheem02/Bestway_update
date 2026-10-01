@@ -7,8 +7,14 @@ $page_title = "Products";
 $compact_page_heading = true;
 require_once __DIR__ . '/../../includes/header.php';
 
+// Action column (View / Edit / Delete) is Admin only
+$can_manage_products = isAdmin();
+
 // Handle Inline Delete Action
 if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id'])) {
+    if (!$can_manage_products) {
+        redirect(BASE_URL . 'modules/product/view_product_list.php', 'You do not have permission to delete products.', 'warning');
+    }
     $del_id = intval($_GET['id']);
     if ($db_connected && $pdo) {
         try {
@@ -314,7 +320,7 @@ if ($db_connected && $pdo) {
         color: #ffffff !important;
     }
     @media print {
-        .page-title-badge, .filter-card, .btn, .sidebar, .topbar, #sidebarWrapper, .pagination, .action-btn, th:last-child, td:last-child {
+        .page-title-badge, .filter-card, .btn, .sidebar, .topbar, #sidebarWrapper, .pagination, .action-btn, .action-col {
             display: none !important;
         }
         body, .content, #content-wrapper {
@@ -328,15 +334,19 @@ if ($db_connected && $pdo) {
 <!-- Top Action Bar -->
 <div class="d-flex justify-content-end align-items-center mb-3">
     <div class="d-flex flex-wrap gap-2">
+        <?php if ($can_manage_products): ?>
         <a href="print_products.php?<?= http_build_query($_GET) ?>" target="_blank" class="btn btn-sm btn-outline-secondary bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-print me-1"></i> Print Products
         </a>
+        <?php endif; ?>
         <a href="../sale/new_sale.php" class="btn btn-sm btn-outline-primary bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-cart-plus me-1"></i> Create Sales Invoice
         </a>
+        <?php if ($can_manage_products): ?>
         <a href="add_product.php" class="btn btn-sm btn-primary fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-plus me-1"></i> Add New Product
         </a>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -466,19 +476,23 @@ if ($db_connected && $pdo) {
                     <th>Company / Category</th>
                     <th class="text-end">TP / Sale Rate</th>
                     <th class="text-center">Stock on Hand</th>
-                    <th class="text-center" style="width: 115px;">Actions</th>
+                    <?php if ($can_manage_products): ?>
+                    <th class="text-center action-col" style="width: 115px;">Actions</th>
+                    <?php endif; ?>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($products)): ?>
                     <tr>
-                        <td colspan="6" class="text-center py-5 text-muted">
+                        <td colspan="<?= $can_manage_products ? 6 : 5 ?>" class="text-center py-5 text-muted">
                             <i class="fa-solid fa-box-open fs-1 text-secondary opacity-50 mb-3 d-block"></i>
                             <h6 class="fw-bold text-dark">No products found</h6>
                             <p class="small text-muted mb-3">No products match your current filters or no products have been added yet.</p>
+                            <?php if ($can_manage_products): ?>
                             <a href="add_product.php" class="btn btn-sm btn-primary fw-bold px-3 py-2">
                                 <i class="fa-solid fa-plus me-1"></i> Add First Product
                             </a>
+                            <?php endif; ?>
                         </td>
                     </tr>
                 <?php else: ?>
@@ -537,7 +551,8 @@ if ($db_connected && $pdo) {
                                 <?php endif; ?>
                             </td>
 
-                            <td class="text-center">
+                            <?php if ($can_manage_products): ?>
+                            <td class="text-center action-col">
                                 <div class="d-flex align-items-center justify-content-center gap-1">
                                     <!-- 1. View Product Details -->
                                     <button type="button" 
@@ -578,6 +593,7 @@ if ($db_connected && $pdo) {
                                     </a>
                                 </div>
                             </td>
+                            <?php endif; ?>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>

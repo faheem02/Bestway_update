@@ -12,6 +12,8 @@ require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/header.php';
 
+requireRole(['admin']);
+
 // ---- Filters ----
 $start_date   = isset($_GET['start_date']) ? trim($_GET['start_date']) : date('Y-m-01');
 $end_date     = isset($_GET['end_date']) ? trim($_GET['end_date']) : date('Y-m-d');

@@ -190,10 +190,13 @@ $sql = "
     SELECT 
         si.*,
         c.invoice_type AS customer_invoice_type,
+        c.license_number AS customer_license_number,
         e.commission_rate AS salesman_commission_rate,
+        COALESCE(ri.returned, 0) AS returned_amount,
         (SELECT COUNT(*) FROM sale_items WHERE invoice_id = si.id) as item_count,
         (SELECT COALESCE(SUM(quantity), 0) FROM sale_items WHERE invoice_id = si.id) as total_units
     FROM sales_invoices si
+    " . getReturnNetJoinSql('si') . "
     LEFT JOIN customers c ON (c.id = si.customer_id OR (si.customer_id IS NULL AND (c.name = si.customer_name OR c.shop_name = si.customer_name)))
     LEFT JOIN employees e ON e.id = si.booker_id
     WHERE $where_sql
@@ -483,18 +486,29 @@ if ($db_connected && $pdo) {
                             </td>
                             <td>
                                 <div class="fw-bold text-dark"><?= htmlspecialchars($inv['customer_name']) ?></div>
-                                
+                                <?php if (($inv['customer_invoice_type'] ?? '') === 'warranty' && !empty($inv['customer_license_number'])): ?>
+                                <div class="small text-muted fw-semibold" style="font-size:11px;" title="Drug / Trade License Number">
+                                    <i class="fa-solid fa-id-card text-success me-1"></i>Customer Lic #: <?= htmlspecialchars($inv['customer_license_number']) ?>
+                                </div>
+                                <?php endif; ?>
                             </td>
                             <td>
                                 <div class="fw-semibold text-dark"><i class="fa-solid fa-user-tie text-muted me-1"></i><?= htmlspecialchars($inv['booker_name'] ?: 'Direct') ?></div>
                                 <?php 
                                     $comm_rate = floatval($inv['salesman_commission_rate'] ?? 0);
+                                    $inv_returned = floatval($inv['returned_amount'] ?? 0);
+                                    $inv_net = netSaleAmount($inv['grand_total'], $inv_returned);
                                     if (!empty($inv['booker_id']) && $comm_rate > 0): 
-                                        $this_sale_comm = round($grand * $comm_rate / 100, 2);
+                                        $this_sale_comm = round($inv_net * $comm_rate / 100, 2);
                                 ?>
-                                    <small class="badge bg-primary-subtle text-primary border border-primary-subtle mt-1" title="Salesman Commission (<?= number_format($comm_rate, 2) ?>%)">
+                                    <small class="badge bg-primary-subtle text-primary border border-primary-subtle mt-1" title="Salesman Commission (<?= number_format($comm_rate, 2) ?>%) on net sale after returns">
                                         <?= number_format($comm_rate, 2) ?>% (Rs. <?= number_format($this_sale_comm, 2) ?>)
                                     </small>
+                                    <?php if ($inv_returned > 0): ?>
+                                        <small class="d-block text-danger" style="font-size:11px;" title="Good / Resalable returns deducted from this invoice">
+                                            <i class="fa-solid fa-rotate-left me-1"></i>Return: -Rs. <?= number_format($inv_returned, 2) ?>
+                                        </small>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                             </td>
                             <td class="text-center">

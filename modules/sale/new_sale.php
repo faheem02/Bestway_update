@@ -362,7 +362,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 }
 
                 // Verify product and current stock directly from DB
-                $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price FROM products WHERE id = ?");
+                $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price, purchase_price,
+                    COALESCE(NULLIF(discount_percent, 0), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = products.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount
+                    FROM products WHERE id = ?");
                 $stmt_chk->execute([$pid]);
                 $prod_row = $stmt_chk->fetch(PDO::FETCH_ASSOC);
 
@@ -381,6 +383,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 // Check 2: Does requested qty exceed available stock?
                 if ($qty > $available_stock) {
                     throw new Exception("Error: Available stock for '{$p_name}' is only {$available_stock} Pcs, but entered quantity is {$qty}.");
+                }
+
+                // Check 3: Non-admin users cannot change the rate or discount. Force master values.
+                if (!isAdmin()) {
+                    $master_tp = floatval($prod_row['trade_price'] ?? 0);
+                    if ($master_tp <= 0) $master_tp = floatval($prod_row['purchase_price'] ?? 0);
+                    if ($master_tp > 0) $tp = $master_tp;
+                    $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
                 }
 
                 $gross = $qty * $tp;
@@ -405,14 +415,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             }
 
             $items_net = $subtotal - $total_discount_cut;
-            $order_discount_percent = floatval($_POST['order_discount_percent'] ?? 0);
+            $order_discount_percent = isAdmin() ? floatval($_POST['order_discount_percent'] ?? 0) : 0.0;
             $order_discount_amount  = $items_net * ($order_discount_percent / 100);
             $total_discount_cut    += $order_discount_amount;
 
             $shipping_cost    = 0.00;
             $adjustment       = 0.00;
-            $round_off        = floatval($_POST['round_off'] ?? 0);
-            $grand_total      = ($items_net - $order_discount_amount) + $round_off;
+            $round_off        = 0.00;
+            $grand_total      = $items_net - $order_discount_amount;
 
             $previous_balance = floatval($_POST['previous_balance'] ?? 0);
             $net_payable      = $grand_total;
@@ -698,6 +708,10 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
     .items-table tbody tr:hover {
         background-color: #f8f9fc;
     }
+    input[readonly] {
+        background-color: #eef1f6;
+        cursor: not-allowed;
+    }
 
     .calc-box {
         background: #f8fafc;
@@ -849,9 +863,11 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                     <a href="sales.php" class="btn btn-sm btn-outline-secondary font-weight-bold mr-2">
                         <i class="fas fa-list mr-1"></i> Invoices
                     </a>
+                    <?php if (isAdmin()): ?>
                     <a href="../areas/index.php" class="btn btn-sm btn-outline-info font-weight-bold">
                         <i class="fas fa-map-marked-alt mr-1"></i> Manage Areas
                     </a>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="card-body">
@@ -1324,15 +1340,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                     <div class="calc-box mb-3">
                         <div class="mb-2">
                             <label class="small font-weight-bold text-muted mb-1">Discount (%):</label>
-                            <input type="number" step="0.01" min="0" max="100" name="order_discount_percent" id="orderDiscount" class="form-control form-control-sm text-right font-weight-bold" placeholder="0.00" value="" onfocus="this.select()">
-                        </div>
-
-                        <div class="d-flex align-items-center justify-content-between mb-2">
-                            <div class="custom-control custom-checkbox">
-                                <input type="checkbox" class="custom-control-input" id="roundOffCheck" name="is_round_off">
-                                <label class="custom-control-label small font-weight-bold text-muted" for="roundOffCheck" style="cursor: pointer;">Round Off</label>
-                            </div>
-                            <input type="number" step="0.01" name="round_off" id="roundOffValue" class="form-control form-control-sm text-right font-weight-bold" style="width: 100px;" placeholder="0.00" onfocus="this.select()">
+                            <input type="number" step="0.01" min="0" max="100" name="order_discount_percent" id="orderDiscount" class="form-control form-control-sm text-right font-weight-bold" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
                         </div>
 
                         <div class="calc-row grand-total mb-2">
@@ -1457,10 +1465,10 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 <input type="number" name="quantity[]" id="qty_${rowId}" class="form-control qty-input text-center font-weight-bold" min="1" placeholder="1" value="" onfocus="this.select()" oninput="onQtyChange(${rowId})" required>
             </td>
             <td>
-                <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control tp-input text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" required>
+                <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control tp-input text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" required<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Price is fixed by product master"' ?>>
             </td>
             <td>
-                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center" placeholder="0.00" value="" onfocus="this.select()">
+                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
             </td>
             <td>
                 <input type="text" class="form-control font-weight-bold row-net text-right font-monospace bg-light" id="rowNet_${rowId}" placeholder="0.00" value="" readonly>
@@ -2242,22 +2250,8 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         const orderDiscountAmt = itemsNetTotal * (orderDiscPercent / 100);
         const afterOrderDisc   = itemsNetTotal - orderDiscountAmt;
 
-        let rawBill = afterOrderDisc;
-
-        // Round Off
-        const roundOffCheck = document.getElementById('roundOffCheck');
-        const roundOffInput = document.getElementById('roundOffValue');
-        let roundOffVal = 0;
-
-        if (roundOffCheck && roundOffCheck.checked) {
-            const targetRounded = Math.round(rawBill);
-            roundOffVal = +(targetRounded - rawBill).toFixed(2);
-            roundOffInput.value = roundOffVal !== 0 ? roundOffVal.toFixed(2) : '0.00';
-        } else if (roundOffInput && roundOffInput.value !== '') {
-            roundOffVal = parseFloat(roundOffInput.value) || 0;
-        }
-
-        const currentBill = rawBill + roundOffVal;
+        const rawBill = afterOrderDisc;
+        const currentBill = rawBill;
         const curBillInput = document.getElementById('currentBillInput');
         if (curBillInput) curBillInput.value = currentBill.toFixed(2);
         const dispBill = document.getElementById('dispCurrentBill');
@@ -2283,11 +2277,6 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
     itemsBody.addEventListener('input', recalculateAll);
     document.getElementById('orderDiscount').addEventListener('input', recalculateAll);
     document.getElementById('paidAmountInput').addEventListener('input', recalculateAll);
-    document.getElementById('roundOffValue').addEventListener('input', function() {
-        document.getElementById('roundOffCheck').checked = false;
-        recalculateAll();
-    });
-    document.getElementById('roundOffCheck').addEventListener('change', recalculateAll);
 
 
 

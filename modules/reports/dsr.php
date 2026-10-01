@@ -8,6 +8,7 @@ $hide_topbar_title = true;
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: ' . BASE_URL . 'login.php'); exit;
 }
+requireRole(['admin']);
 
 $date       = $_GET['date'] ?? date('Y-m-d');
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) $date = date('Y-m-d');

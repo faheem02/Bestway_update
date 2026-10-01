@@ -1,6 +1,13 @@
 <?php
 require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../includes/functions.php';
+
+if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+    header('Location: ' . BASE_URL . 'login.php');
+    exit;
+}
+requireRole(['admin']);
 
 $customer_id = (int)($_GET['id'] ?? 0);
 

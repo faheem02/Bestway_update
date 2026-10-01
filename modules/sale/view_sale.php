@@ -26,8 +26,9 @@ if ($id <= 0) {
 
 // Fetch invoice details
 $stmt = $conn->prepare("
-    SELECT si.*, c.invoice_type AS customer_invoice_type, c.license_number, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type 
+    SELECT si.*, c.invoice_type AS customer_invoice_type, c.license_number, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type, COALESCE(ri.returned, 0) AS returned_amount
     FROM sales_invoices si
+    " . getReturnNetJoinSql('si') . "
     LEFT JOIN customers c ON (c.id = si.customer_id OR (si.customer_id IS NULL AND (c.name = si.customer_name OR c.shop_name = si.customer_name)))
     LEFT JOIN employees e ON e.id = si.booker_id
     WHERE si.id = ?
@@ -195,8 +196,10 @@ if ($inv_balance <= 0.01) {
             <div class="fw-bold text-dark fs-6"><?= htmlspecialchars($invoice['booker_name'] ?: 'Counter Direct') ?></div>
             <?php 
                 $rate = floatval($invoice['salesman_commission_rate'] ?? 0);
+                $inv_returned = floatval($invoice['returned_amount'] ?? 0);
+                $inv_net = netSaleAmount($grand, $inv_returned);
                 if (!empty($invoice['booker_id']) && $rate > 0): 
-                    $sale_comm = round($grand * $rate / 100, 2);
+                    $sale_comm = round($inv_net * $rate / 100, 2);
             ?>
                 <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
                     <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1">
@@ -205,6 +208,11 @@ if ($inv_balance <= 0.01) {
                     <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
                         <i class="fa-solid fa-coins me-1"></i> Commission on this Sale: Rs. <?= number_format($sale_comm, 2) ?>
                     </span>
+                    <?php if ($inv_returned > 0): ?>
+                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle px-2 py-1" title="Completed Good / Resalable returns of this invoice — commission inverts on the returned amount">
+                            <i class="fa-solid fa-rotate-left me-1"></i> Returned: -Rs. <?= number_format($inv_returned, 2) ?>
+                        </span>
+                    <?php endif; ?>
                     <a href="../employees/ledger.php?emp_id=<?= (int)$invoice['booker_id'] ?>&month=<?= date('Y-m', strtotime($invoice['invoice_date'])) ?>" class="btn btn-xs btn-outline-secondary py-0" style="font-size:0.75rem;" target="_blank">
                         <i class="fa-solid fa-book-open me-1"></i> View Month Ledger
                     </a>

@@ -34,6 +34,8 @@ $queries = [
     // Ensure all required columns from bestway_wholesale.sql exist across all tables
     "ALTER TABLE `company_settings` ADD COLUMN `ntn_no` VARCHAR(50) DEFAULT NULL",
     "ALTER TABLE `company_settings` ADD COLUMN `strn_no` VARCHAR(50) DEFAULT NULL",
+    "ALTER TABLE `company_settings` ADD COLUMN `drug_license_no` VARCHAR(100) DEFAULT NULL",
+    "ALTER TABLE `company_settings` ADD COLUMN `drug_license_valid_upto` DATE DEFAULT NULL",
     "ALTER TABLE `company_settings` ADD COLUMN `invoice_footer_notes` TEXT DEFAULT NULL",
     "ALTER TABLE `bookers` ADD COLUMN `commission_rate` DECIMAL(5,2) DEFAULT 0.00",
     "ALTER TABLE `customer_payments` ADD COLUMN `collector_staff_id` INT NULL",

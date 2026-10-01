@@ -6,6 +6,7 @@ $page_title = 'Edit Customer';
 if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: ' . BASE_URL . 'login.php'); exit;
 }
+requireRole(['admin']);
 $id = (int)($_GET['id'] ?? 0);
 $customer = getById('customers', $id);
 if (!$customer) { redirect('customers.php', 'Customer not found.', 'error'); }

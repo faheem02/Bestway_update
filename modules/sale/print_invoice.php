@@ -119,11 +119,22 @@ if ($type === '' && !$manual) {
 
 // ── Company info ───────────────────────────────────────────────────────────────
 $company = [
-    'name'    => 'Bestway Distribution',
-    'address' => 'Flate #01 Majid Haleema Sadia road Gate #01 Al Rehman Garden Ph 2 Sharaqpur Road Sheikhupura',
-    'phone'   => '0329-9339000',
-    'owner'   => 'Syed Wasim Hussain Sherazi',
+    'name'             => 'Bestway Distribution',
+    'address'          => 'Flate #01 Majid Haleema Sadia road Gate #01 Al Rehman Garden Ph 2 Sharaqpur Road Sheikhupura',
+    'phone'            => '0329-9339000',
+    'owner'            => 'Syed Wasim Hussain Sherazi',
+    'drug_license_no'  => '05-354-0078-140668D',
+    'drug_license_upto'=> '17-09-2031',
 ];
+
+// Company drug / trade license — DB se override (same fallback pattern as includes/report_header.php)
+try {
+    $cs_row = $pdo ? $pdo->query("SELECT drug_license_no, drug_license_valid_upto FROM company_settings LIMIT 1")->fetch(PDO::FETCH_ASSOC) : null;
+    if ($cs_row) {
+        if (!empty($cs_row['drug_license_no'])) $company['drug_license_no'] = $cs_row['drug_license_no'];
+        if (!empty($cs_row['drug_license_valid_upto'])) $company['drug_license_upto'] = date('d-m-Y', strtotime($cs_row['drug_license_valid_upto']));
+    }
+} catch (Exception $e) {}
 
 $inv_no      = htmlspecialchars($invoice['invoice_no'] ?? '#'.$id);
 $inv_date    = date('d-M-Y', strtotime($invoice['invoice_date'] ?? date('Y-m-d')));
@@ -302,7 +313,11 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
       <div class="company-name"><?= htmlspecialchars($company['name']) ?></div>
       <div class="company-meta">
         <i class="fas fa-map-marker-alt mr-1"></i><?= htmlspecialchars($company['address']) ?><br>
-        <i class="fas fa-phone mr-1"></i><?= htmlspecialchars($company['phone']) ?>
+        <i class="fas fa-phone mr-1"></i><?= htmlspecialchars($company['phone']) ?><br>
+        <?php if (!empty($company['drug_license_no'])): ?>
+        <i class="fas fa-id-card mr-1"></i><span class="text-nowrap">Company Drug Lic #:</span> <strong><?= htmlspecialchars($company['drug_license_no']) ?></strong>
+        &nbsp;|&nbsp;Valid up to: <strong><?= htmlspecialchars($company['drug_license_upto']) ?></strong>
+        <?php endif; ?>
       </div>
     </div>
     <div class="inv-title-box">
@@ -340,8 +355,10 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
         <div class="font-weight-bold mt-1" style="font-size:14px;"><?= $cust_name ?></div>
         <?php if ($cust_phone): ?><div class="text-muted small"><i class="fas fa-phone mr-1"></i><?= $cust_phone ?></div><?php endif; ?>
         <?php if ($route_name): ?><div class="text-muted small"><i class="fas fa-map-marker-alt mr-1"></i>Area: <?= $route_name ?></div><?php endif; ?>
-        <?php if ($type === 'warranty' && !empty($cust_license)): ?>
-          <div class="small font-weight-bold mt-1 text-dark"><i class="fas fa-id-card text-success mr-1"></i>Drug Lic #: <span class="text-primary font-weight-bold"><?= htmlspecialchars($cust_license) ?></span></div>
+        <?php if (!empty($cust_license)): ?>
+          <div class="small font-weight-bold mt-1 text-dark"><i class="fas fa-id-card text-success mr-1"></i>Customer Drug Lic #: <span class="text-primary font-weight-bold"><?= htmlspecialchars($cust_license) ?></span></div>
+        <?php elseif ($type === 'warranty'): ?>
+          <div class="small font-weight-bold mt-1 text-muted"><i class="fas fa-id-card mr-1"></i>Customer Drug Lic #: <span class="fst-italic">not on record</span></div>
         <?php endif; ?>
       </div>
     </div>

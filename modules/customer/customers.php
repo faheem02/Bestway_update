@@ -7,6 +7,10 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: ' . BASE_URL . 'login.php'); exit;
 }
 
+if (($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_customer') && !isAdmin()) {
+    redirect('customers.php', 'Access denied. You do not have permission to add customers.', 'error');
+}
+
 // Add customer
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_customer') {
     $name  = trim($_POST['name'] ?? '');
@@ -108,9 +112,11 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
   <div class="card-header d-flex flex-wrap justify-content-between align-items-center">
     <h6 class="mb-0"><i class="fas fa-users mr-1"></i> Customers (<?= count($customers) ?>)</h6>
     <div class="d-flex flex-wrap align-items-center mt-2 mt-md-0">
+      <?php if (isAdmin()): ?>
       <button type="button" class="btn btn-sm btn-success mr-2" data-toggle="modal" data-target="#addCustomerModal">
         <i class="fas fa-plus mr-1"></i> Add Customer
       </button>
+      <?php endif; ?>
       <button type="button" class="btn btn-sm btn-primary" onclick="window.print()"><i class="fas fa-print mr-1"></i> Print</button>
     </div>
   </div>
@@ -128,7 +134,7 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
             <th>Customer No</th><th>Name</th><th>Phone</th><th>Area</th>
             <th class="text-center">Invoice Type</th>
             <th class="text-right">Balance</th>
-            <th class="text-center d-print-none">Action</th>
+            <?php if (isAdmin()): ?><th class="text-center d-print-none">Action</th><?php endif; ?>
           </tr>
         </thead>
         <tbody>
@@ -155,16 +161,18 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
               <?php endif; ?>
             </td>
             <td class="<?= $cls ?> font-weight-bold text-right"><?= $lbl ?></td>
+            <?php if (isAdmin()): ?>
             <td class="text-center d-print-none" nowrap>
               <a href="edit_customer.php?id=<?= $c['id'] ?>" class="btn btn-sm btn-outline-warning" title="Edit"><i class="fas fa-edit"></i></a>
               <a href="customer_ledger.php?id=<?= $c['id'] ?>" class="btn btn-sm btn-outline-primary" title="Ledger"><i class="fas fa-book"></i></a>
               <a href="receive_amount.php?customer_id=<?= $c['id'] ?>" class="btn btn-sm btn-outline-success" title="Receive Amount"><i class="fas fa-hand-holding-usd"></i></a>
               <a href="delete_customer.php?id=<?= $c['id'] ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete customer <?= htmlspecialchars($c['name']) ?>?');" title="Delete"><i class="fas fa-trash"></i></a>
             </td>
+            <?php endif; ?>
           </tr>
           <?php endforeach; ?>
           <?php if (empty($customers)): ?>
-            <tr><td colspan="7" class="text-center text-muted py-4">No customers yet. <a href="#" data-toggle="modal" data-target="#addCustomerModal">Add your first customer</a>.</td></tr>
+            <tr><td colspan="<?= isAdmin() ? 7 : 6 ?>" class="text-center text-muted py-4">No customers yet.<?php if (isAdmin()): ?> <a href="#" data-toggle="modal" data-target="#addCustomerModal">Add your first customer</a>.<?php endif; ?></td></tr>
           <?php endif; ?>
         </tbody>
       </table>

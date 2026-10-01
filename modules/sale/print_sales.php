@@ -103,9 +103,12 @@ if ($route_id > 0 && $db_connected && $pdo) {
 $sql = "
     SELECT 
         si.*,
+        c.invoice_type AS customer_invoice_type,
+        c.license_number AS customer_license_number,
         (SELECT COUNT(*) FROM sale_items WHERE invoice_id = si.id) as item_count,
         (SELECT COALESCE(SUM(quantity), 0) FROM sale_items WHERE invoice_id = si.id) as total_units
     FROM sales_invoices si
+    LEFT JOIN customers c ON (c.id = si.customer_id OR (si.customer_id IS NULL AND (c.name = si.customer_name OR c.shop_name = si.customer_name)))
     WHERE $where_sql
     ORDER BY si.id DESC
 ";
@@ -326,6 +329,9 @@ foreach ($invoices as $inv) {
                             <td><?= date('d-M-Y', strtotime($inv['invoice_date'])) ?></td>
                             <td>
                                 <div class="fw-bold"><?= htmlspecialchars($inv['customer_name'] ?? 'Walk-in Customer') ?></div>
+                                <?php if (($inv['customer_invoice_type'] ?? '') === 'warranty' && !empty($inv['customer_license_number'])): ?>
+                                    <small class="text-muted fw-semibold" style="font-size:11px;"><i class="fa-solid fa-id-card text-success me-1"></i>Customer Lic #: <?= htmlspecialchars($inv['customer_license_number']) ?></small>
+                                <?php endif; ?>
                                 <?php if (!empty($inv['route_name'])): ?>
                                     <small class="text-muted"><i class="fa-solid fa-map-pin me-1"></i><?= htmlspecialchars($inv['route_name']) ?></small>
                                 <?php endif; ?>

@@ -573,9 +573,49 @@ if (!function_exists('roleLabel')) {
             'general'      => 'General',
         ];
         $key = strtolower($role);
-        return $labels[$key] ?? ucfirst(str_replace('_', ' ', $role));
+        return         $labels[$key] ?? ucfirst(str_replace('_', ' ', $role));
     }
 }
+
+if (!function_exists('getReturnNetJoinSql')) {
+    /**
+     * LEFT JOIN fragment that attaches a per-invoice `returned_amount` to a
+     * `sales_invoices <alias>` query.
+     *
+     * Commission is earned on NET sales, so completed returns must be deducted,
+     * otherwise a salesman keeps commission on goods they already returned.
+     *
+     * Only 'Good / Resalable' items count — damaged/defective goods never get
+     * re-sold, so they must not reduce a commission that was genuinely earned.
+     *
+     * NB: sale_return_items.return_id is the column the app actually writes to;
+     * sale_return_id is legacy and always NULL.
+     *
+     * Usage:  ... FROM sales_invoices si <this> WHERE ...
+     *         then read: COALESCE(ri.returned, 0) AS returned_amount
+     */
+    function getReturnNetJoinSql($alias = 'si') {
+        return "LEFT JOIN (
+                    SELECT sr.sale_id, SUM(sri.total_price) AS returned
+                    FROM sale_returns sr
+                    JOIN sale_return_items sri ON sri.return_id = sr.id
+                    WHERE sr.status = 'Completed' AND sri.`condition` = 'Good / Resalable'
+                    GROUP BY sr.sale_id
+                 ) ri ON ri.sale_id = {$alias}.id";
+    }
+}
+
+if (!function_exists('netSaleAmount')) {
+    /**
+     * Commission base for a single invoice: gross minus returned, floored at 0
+     * so an over-return can never manufacture a negative commission.
+     */
+    function netSaleAmount($gross, $returned) {
+        return max(0.0, (float)$gross - (float)$returned);
+    }
+}
+
+
 
 if (!function_exists('currentSalesmanForUser')) {
     function currentSalesmanForUser($pdo, $user_id) {

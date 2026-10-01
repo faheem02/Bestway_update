@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS `company_settings` (
   `address` TEXT DEFAULT NULL,
   `ntn_no` VARCHAR(50) DEFAULT NULL,
   `strn_no` VARCHAR(50) DEFAULT NULL,
+  `drug_license_no` VARCHAR(100) DEFAULT NULL,
+  `drug_license_valid_upto` DATE DEFAULT NULL,
   `invoice_footer_notes` TEXT DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

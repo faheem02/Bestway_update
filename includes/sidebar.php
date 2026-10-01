@@ -200,8 +200,8 @@ $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
     </div>
     <?php endif; ?>
 
-    <!-- Reports -->
-    <?php if (isAdmin() || isSalesTeam()): ?>
+    <!-- Reports (Admin only) -->
+    <?php if (isAdmin()): ?>
     <hr class="sidebar-divider">
     <div class="sidebar-heading">Reports</div>
 
