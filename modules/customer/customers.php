@@ -7,7 +7,7 @@ if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
     header('Location: ' . BASE_URL . 'login.php'); exit;
 }
 
-if (($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_customer') && !isAdmin()) {
+if (($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_customer') && !canAddCustomer()) {
     redirect('customers.php', 'Access denied. You do not have permission to add customers.', 'error');
 }
 
@@ -112,7 +112,7 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
   <div class="card-header d-flex flex-wrap justify-content-between align-items-center">
     <h6 class="mb-0"><i class="fas fa-users mr-1"></i> Customers (<?= count($customers) ?>)</h6>
     <div class="d-flex flex-wrap align-items-center mt-2 mt-md-0">
-      <?php if (isAdmin()): ?>
+      <?php if (canAddCustomer()): ?>
       <button type="button" class="btn btn-sm btn-success mr-2" data-toggle="modal" data-target="#addCustomerModal">
         <i class="fas fa-plus mr-1"></i> Add Customer
       </button>
@@ -172,7 +172,7 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           </tr>
           <?php endforeach; ?>
           <?php if (empty($customers)): ?>
-            <tr><td colspan="<?= isAdmin() ? 7 : 6 ?>" class="text-center text-muted py-4">No customers yet.<?php if (isAdmin()): ?> <a href="#" data-toggle="modal" data-target="#addCustomerModal">Add your first customer</a>.<?php endif; ?></td></tr>
+            <tr><td colspan="<?= isAdmin() ? 7 : 6 ?>" class="text-center text-muted py-4">No customers yet.<?php if (canAddCustomer()): ?> <a href="#" data-toggle="modal" data-target="#addCustomerModal">Add your first customer</a>.<?php endif; ?></td></tr>
           <?php endif; ?>
         </tbody>
       </table>

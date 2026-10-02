@@ -41,7 +41,7 @@ if ($db_connected && $pdo) {
 }
 
 // Handle Form Submission: Create Sale Return
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return'])) {
     $return_no       = trim($_POST['return_no'] ?? $auto_return_no);
     $invoice_id      = intval($_POST['invoice_id'] ?? 0);
     $customer_name   = trim($_POST['customer_name'] ?? '');
@@ -87,11 +87,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
             try {
                 $stmt_ret_qty = $conn->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS returned_qty
                     FROM sale_return_items sri
-                    JOIN sale_returns sr ON sr.id = sri.return_id
-                    WHERE sr.sale_id = ? AND sr.status = 'Completed' AND sri.`condition` = 'Good / Resalable'
+                    JOIN sale_returns sr ON (sr.id = sri.return_id OR sr.id = sri.sale_return_id)
+                    WHERE (sr.sale_id = ? OR sr.invoice_id = ?) AND sr.status = 'Completed'
                     GROUP BY sri.product_id");
                 if ($stmt_ret_qty) {
-                    $stmt_ret_qty->bind_param("i", $invoice_id);
+                    $stmt_ret_qty->bind_param("ii", $invoice_id, $invoice_id);
                     $stmt_ret_qty->execute();
                     $res_rq = $stmt_ret_qty->get_result();
                     while ($row_rq = $res_rq->fetch_assoc()) {
@@ -125,10 +125,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                 }
                 $line = $lines[$cursor];
 
-                $sold_qty    = intval($line['quantity']);
-                $line_total  = floatval($line['total_price']);
-                $already_ret = $returned_map[$pid] ?? 0;
-                $available   = $sold_qty - $already_ret;
+                $sold_qty     = intval($line['quantity']);
+                $line_total   = floatval($line['total_price']);
+                $already_ret  = $returned_map[$pid] ?? 0;
+                $consumed_ret = min($sold_qty, $already_ret);
+                $available    = max(0, $sold_qty - $consumed_ret);
+                $returned_map[$pid] = max(0, $already_ret - $consumed_ret);
 
                 if ($ret_qty > $available) {
                     throw new Exception("Error: Return quantity ({$ret_qty}) for medicine '{$pname}' cannot exceed returnable quantity ({$available}).");
@@ -185,13 +187,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
 
             // 2. Insert line items & restore stock
             $stmt_item = $pdo->prepare("
-                INSERT INTO sale_return_items (return_id, product_id, quantity, unit_price, total_price, `condition`)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, quantity, unit_price, total_price, `condition`)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
 
             foreach ($validated_return_items as $vi) {
-                $stmt_item->execute([$return_id, $vi['product_id'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
+                $stmt_item->execute([$return_id, $return_id, $vi['product_id'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
                 if ($vi['condition'] === 'Good / Resalable') {
                     $stmt_stock->execute([$vi['quantity'], $vi['product_id']]);
                 }
@@ -221,9 +223,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
     }
 }
 
-// Fetch all available Sales Invoices for the dropdown
+// Fetch all available Sales Invoices for the dropdown with their return status
 $invoices_list = [];
-$res_inv = $conn->query("SELECT id, invoice_no, customer_name, invoice_date, grand_total, balance_due FROM sales_invoices ORDER BY id DESC LIMIT 150");
+$res_inv = $conn->query("
+    SELECT si.id, si.invoice_no, si.customer_name, si.invoice_date, si.grand_total, si.balance_due,
+           COALESCE(items_stat.total_sold_qty, 0) AS total_sold_qty,
+           COALESCE(ret_stat.total_ret_qty, 0) AS total_ret_qty
+    FROM sales_invoices si
+    LEFT JOIN (
+        SELECT invoice_id, SUM(quantity) AS total_sold_qty
+        FROM sale_items
+        GROUP BY invoice_id
+    ) items_stat ON items_stat.invoice_id = si.id
+    LEFT JOIN (
+        SELECT COALESCE(sr.sale_id, sr.invoice_id) AS inv_id, SUM(sri.quantity) AS total_ret_qty
+        FROM sale_returns sr
+        JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
+        WHERE sr.status = 'Completed'
+        GROUP BY COALESCE(sr.sale_id, sr.invoice_id)
+    ) ret_stat ON ret_stat.inv_id = si.id
+    ORDER BY si.id DESC LIMIT 150
+");
 if ($res_inv) {
     $invoices_list = $res_inv->fetch_all(MYSQLI_ASSOC);
 }
@@ -232,6 +252,11 @@ if ($res_inv) {
 $selected_invoice_id = intval($_GET['invoice_id'] ?? 0);
 $selected_invoice = null;
 $selected_items = [];
+$existing_invoice_returns = [];
+$already_returned = [];
+$total_inv_sold = 0;
+$total_inv_ret = 0;
+$total_available_to_return = 0;
 
 if ($selected_invoice_id > 0) {
     $stmt = $conn->prepare("SELECT * FROM sales_invoices WHERE id = ?");
@@ -249,25 +274,50 @@ if ($selected_invoice_id > 0) {
         $selected_items = $r_items->fetch_all(MYSQLI_ASSOC);
         $stmt_items->close();
 
-        // How much of each product was already returned — the form must not offer
-        // more than what is genuinely still returnable.
-        $already_returned = [];
+        // How much of each product was already returned
         try {
             $stmt_ar = $conn->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS returned_qty
                 FROM sale_return_items sri
-                JOIN sale_returns sr ON sr.id = sri.return_id
-                WHERE sr.sale_id = ? AND sr.status = 'Completed' AND sri.`condition` = 'Good / Resalable'
+                JOIN sale_returns sr ON (sr.id = sri.return_id OR sr.id = sri.sale_return_id)
+                WHERE (sr.sale_id = ? OR sr.invoice_id = ?) AND sr.status = 'Completed'
                 GROUP BY sri.product_id");
             if ($stmt_ar) {
-                $stmt_ar->bind_param("i", $selected_invoice_id);
+                $stmt_ar->bind_param("ii", $selected_invoice_id, $selected_invoice_id);
                 $stmt_ar->execute();
                 $res_ar = $stmt_ar->get_result();
                 while ($row_ar = $res_ar->fetch_assoc()) {
                     $already_returned[intval($row_ar['product_id'])] = intval($row_ar['returned_qty']);
+                    $total_inv_ret += intval($row_ar['returned_qty']);
                 }
                 $stmt_ar->close();
             }
+
+            // Existing return vouchers for this invoice
+            $stmt_eir = $conn->prepare("SELECT id, return_no, return_date, total_amount, status 
+                FROM sale_returns 
+                WHERE (sale_id = ? OR invoice_id = ?) AND status = 'Completed' 
+                ORDER BY id DESC");
+            if ($stmt_eir) {
+                $stmt_eir->bind_param("ii", $selected_invoice_id, $selected_invoice_id);
+                $stmt_eir->execute();
+                $existing_invoice_returns = $stmt_eir->get_result()->fetch_all(MYSQLI_ASSOC);
+                $stmt_eir->close();
+            }
         } catch (Exception $e) {}
+
+        // Calculate available returnable quantity across items
+        $ret_pool = $already_returned;
+        foreach ($selected_items as $it) {
+            $pid = intval($it['product_id']);
+            $sold_q = intval($it['quantity']);
+            $total_inv_sold += $sold_q;
+
+            $already_ret_this = $ret_pool[$pid] ?? 0;
+            $consume = min($sold_q, $already_ret_this);
+            $ret_avail = max(0, $sold_q - $consume);
+            $ret_pool[$pid] = max(0, $already_ret_this - $consume);
+            $total_available_to_return += $ret_avail;
+        }
     }
 }
 
@@ -278,7 +328,7 @@ if ($db_connected && $pdo) {
         $recent_returns = $pdo->query("
             SELECT sr.*, COUNT(sri.id) as total_items_count
             FROM sale_returns sr
-            LEFT JOIN sale_return_items sri ON sri.sale_return_id = sr.id
+            LEFT JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
             GROUP BY sr.id
             ORDER BY sr.id DESC LIMIT 15
         ")->fetchAll(PDO::FETCH_ASSOC);
@@ -377,9 +427,15 @@ if ($db_connected && $pdo) {
                     <label class="form-label small fw-bold text-muted mb-1">Select Sales Invoice <span class="text-danger">*</span></label>
                     <select name="invoice_id" id="invoiceSelect" class="form-select" onchange="loadInvoiceForReturn(this.value)" required>
                         <option value="">-- Choose Sales Invoice --</option>
-                        <?php foreach ($invoices_list as $inv): ?>
-                            <option value="<?= $inv['id'] ?>" <?= ($selected_invoice_id == $inv['id']) ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($inv['invoice_no']) ?> - <?= htmlspecialchars($inv['customer_name']) ?> (Rs. <?= number_format($inv['grand_total'], 2) ?>)
+                        <?php foreach ($invoices_list as $inv): 
+                            $s_qty = (int)($inv['total_sold_qty'] ?? 0);
+                            $r_qty = (int)($inv['total_ret_qty'] ?? 0);
+                            $is_fully = ($s_qty > 0 && $r_qty >= $s_qty);
+                            $is_part  = ($r_qty > 0 && $r_qty < $s_qty);
+                            $badge_txt = $is_fully ? ' — [FULLY RETURNED (Pura Return Ho Chuka)]' : ($is_part ? ' — [Partially Returned (' . ($s_qty - $r_qty) . ' remaining)]' : '');
+                        ?>
+                            <option value="<?= $inv['id'] ?>" <?= ($selected_invoice_id == $inv['id']) ? 'selected' : '' ?> style="<?= $is_fully ? 'color:#94a3b8;background:#f8fafc;' : '' ?>">
+                                <?= htmlspecialchars($inv['invoice_no']) ?> - <?= htmlspecialchars($inv['customer_name']) ?> (Rs. <?= number_format($inv['grand_total'], 2) ?>)<?= $badge_txt ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -419,7 +475,43 @@ if ($db_connected && $pdo) {
                     <i class="fa-solid fa-hand-pointer fs-2 mb-2 text-secondary d-block"></i>
                     Please <strong>select a Sales Invoice</strong> above to load its medicines.
                 </div>
+            <?php elseif ($total_available_to_return <= 0): ?>
+                <div class="alert alert-warning border-warning shadow-sm rounded-3 p-4 mb-3">
+                    <div class="d-flex align-items-start gap-3">
+                        <i class="fa-solid fa-triangle-exclamation text-warning fs-2 mt-1"></i>
+                        <div class="flex-grow-1">
+                            <h5 class="fw-bold mb-1 text-dark">Is Invoice ke tamam items pehle hi mukammal tor par return ho chuke hain! (Fully Returned)</h5>
+                            <p class="text-muted mb-2">
+                                Total Sold: <strong class="text-dark"><?= $total_inv_sold ?> units</strong> &middot; 
+                                Total Already Returned: <strong class="text-danger"><?= $total_inv_ret ?> units</strong>. 
+                                Is invoice me mazeed return karne ke liye koi quantity baqi nahi hai.
+                            </p>
+                            <?php if (!empty($existing_invoice_returns)): ?>
+                                <div class="p-3 bg-white rounded border mt-2">
+                                    <strong class="text-dark d-block mb-1"><i class="fa-solid fa-file-invoice text-danger me-1"></i> Pehle se darj shuda Return Vouchers:</strong>
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <?php foreach ($existing_invoice_returns as $eir): ?>
+                                            <a href="print_return.php?id=<?= $eir['id'] ?>" target="_blank" class="btn btn-sm btn-outline-danger font-monospace">
+                                                <i class="fa-solid fa-print me-1"></i><?= htmlspecialchars($eir['return_no']) ?> &mdash; Rs. <?= number_format($eir['total_amount'], 2) ?> (<?= date('d M Y', strtotime($eir['return_date'])) ?>)
+                                            </a>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </div>
+                            <?php endif; ?>
+                            <div class="mt-3">
+                                <a href="sale_return.php" class="btn btn-outline-secondary btn-sm"><i class="fa-solid fa-arrow-left me-1"></i> Dusri Invoice Select Karein</a>
+                                <a href="sales.php" class="btn btn-outline-primary btn-sm ms-2"><i class="fa-solid fa-list me-1"></i> View All Sales</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             <?php else: ?>
+                <div class="d-flex justify-content-between align-items-center mb-2 px-1">
+                    <span class="text-muted small">Return ke liye available medicines: <strong class="text-success"><?= $total_available_to_return ?> units</strong></span>
+                    <button type="button" class="btn btn-sm btn-outline-danger fw-bold" onclick="setAllRowsMax()">
+                        <i class="fa-solid fa-check-double me-1"></i> Return Full Invoice (Tamam Return Karein)
+                    </button>
+                </div>
                 <div class="table-responsive border rounded-3 overflow-hidden shadow-sm mb-3">
                     <table class="table table-return mb-0">
                         <thead>
@@ -427,25 +519,23 @@ if ($db_connected && $pdo) {
                                 <th style="width: 45px;" class="text-center">#</th>
                                 <th>Medicine / Product Name</th>
                                 <th style="width: 110px;" class="text-center">Sold Qty</th>
-                                <th style="width: 140px;" class="text-center">Return Qty <span class="text-danger">*</span></th>
-                                <th style="width: 150px;" class="text-end">Refund Price (Rs)</th>
+                                <th style="width: 180px;" class="text-center">Return Qty <span class="text-danger">*</span></th>
+                                <th style="width: 140px;" class="text-end">Refund Rate</th>
                                 <th style="width: 180px;">Condition</th>
                                 <th style="width: 140px;" class="text-end">Refund Amount</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php
-                            $ret_used_seen = [];
+                            $ret_pool = $already_returned;
                             foreach ($selected_items as $idx => $it):
                                 $pid = intval($it['product_id']);
                                 $sold_q = intval($it['quantity']);
-                                // Effective price the customer actually paid for this line
-                                // (item discount + invoice level discount already included).
                                 $tp = $sold_q > 0 ? round(floatval($it['total_price']) / $sold_q, 2) : 0.0;
-                                // Spread the already-returned qty across duplicate lines of
-                                // the same product, in the order they were sold.
-                                $ret_used_seen[$pid] = ($ret_used_seen[$pid] ?? 0) + min($sold_q, $already_returned[$pid] ?? 0);
-                                $returnable = max(0, $sold_q - $ret_used_seen[$pid]);
+                                $already_this = $ret_pool[$pid] ?? 0;
+                                $consume = min($sold_q, $already_this);
+                                $returnable = max(0, $sold_q - $consume);
+                                $ret_pool[$pid] = max(0, $already_this - $consume);
                             ?>
                                 <tr>
                                     <td class="text-center text-muted fw-bold"><?= $idx + 1 ?></td>
@@ -456,14 +546,33 @@ if ($db_connected && $pdo) {
                                         <input type="hidden" name="items[<?= $idx ?>][unit_price]" id="price_<?= $idx ?>" value="<?= $tp ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][max_qty]" value="<?= $returnable ?>">
                                     </td>
-                                    <td class="text-center fw-bold text-secondary"><?= $sold_q ?><?php if ($returnable < $sold_q): ?><small class="d-block text-danger" style="font-size:10px;"><?= $sold_q - $returnable ?> returned</small><?php endif; ?></td>
+                                    <td class="text-center fw-bold text-secondary">
+                                        <?= $sold_q ?>
+                                        <?php if ($consume > 0): ?>
+                                            <small class="d-block text-danger font-weight-normal" style="font-size:10px;">-<?= $consume ?> returned</small>
+                                        <?php endif; ?>
+                                    </td>
                                     <td>
                                         <?php if ($returnable > 0): ?>
-                                        <input type="number" name="items[<?= $idx ?>][quantity]" id="qty_<?= $idx ?>" class="form-control form-control-sm text-center fw-bold text-danger ret-qty-input" min="0" max="<?= $returnable ?>" value="0" oninput="calculateReturnRow(<?= $idx ?>, <?= $returnable ?>)">
-                                        <small class="text-muted d-block text-center" style="font-size: 10px;">Max: <?= $returnable ?></small>
+                                            <div class="input-group input-group-sm justify-content-center" style="max-width: 165px; margin: 0 auto;">
+                                                <button type="button" class="btn btn-outline-secondary px-2" onclick="adjustQty(<?= $idx ?>, -1, <?= $returnable ?>)" title="Decrease">-</button>
+                                                <input type="number" 
+                                                       name="items[<?= $idx ?>][quantity]" 
+                                                       id="qty_<?= $idx ?>" 
+                                                       class="form-control form-control-sm text-center fw-bold text-danger ret-qty-input" 
+                                                       min="0" 
+                                                       max="<?= $returnable ?>" 
+                                                       value="0" 
+                                                       onfocus="if(this.value==='0') this.value='';" 
+                                                       onblur="if(this.value==='') { this.value='0'; calculateReturnRow(<?= $idx ?>, <?= $returnable ?>); }"
+                                                       oninput="calculateReturnRow(<?= $idx ?>, <?= $returnable ?>)">
+                                                <button type="button" class="btn btn-outline-secondary px-2" onclick="adjustQty(<?= $idx ?>, 1, <?= $returnable ?>)" title="Increase">+</button>
+                                                <button type="button" class="btn btn-danger px-2 fw-bold" onclick="setRowMax(<?= $idx ?>, <?= $returnable ?>)" title="Return All Available">All</button>
+                                            </div>
+                                            <small class="text-muted d-block text-center mt-1" style="font-size: 10px;">Available: <strong><?= $returnable ?></strong></small>
                                         <?php else: ?>
-                                        <input type="hidden" name="items[<?= $idx ?>][quantity]" value="0">
-                                        <span class="text-muted small fst-italic">fully returned</span>
+                                            <input type="hidden" name="items[<?= $idx ?>][quantity]" value="0">
+                                            <span class="badge bg-light text-muted border">fully returned</span>
                                         <?php endif; ?>
                                     </td>
                                     <td class="text-end font-monospace">Rs. <?= number_format($tp, 2) ?></td>
@@ -526,8 +635,8 @@ if ($db_connected && $pdo) {
                             </div>
 
                             <div class="mt-4">
-                                <button type="submit" name="save_return" class="btn btn-danger w-100 fw-bold py-2 shadow-sm text-uppercase">
-                                    <i class="fa-solid fa-check me-1"></i> Confirm & Save Return
+                                <button type="submit" name="save_return" id="saveReturnBtn" class="btn btn-danger w-100 fw-bold py-2 shadow-sm text-uppercase">
+                                    <i class="fa-solid fa-check me-1"></i> Confirm &amp; Save Return
                                 </button>
                             </div>
                         </div>
@@ -588,10 +697,11 @@ if ($db_connected && $pdo) {
 
     function calculateReturnRow(idx, maxQty) {
         const qtyInput = document.getElementById('qty_' + idx);
+        if (!qtyInput) return;
         let qty = parseInt(qtyInput.value) || 0;
 
         if (qty > maxQty) {
-            alert('⚠️ Return quantity cannot exceed sold quantity (' + maxQty + ')!');
+            alert('⚠️ Return quantity cannot exceed available quantity (' + maxQty + ')!');
             qty = maxQty;
             qtyInput.value = maxQty;
         } else if (qty < 0) {
@@ -601,9 +711,39 @@ if ($db_connected && $pdo) {
 
         const price = parseFloat(document.getElementById('price_' + idx).value) || 0;
         const total = qty * price;
-        document.getElementById('rowTotal_' + idx).textContent = 'Rs. ' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const rowTotalEl = document.getElementById('rowTotal_' + idx);
+        if (rowTotalEl) {
+            rowTotalEl.textContent = 'Rs. ' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
 
         recalculateGrandRefund();
+    }
+
+    function adjustQty(idx, delta, maxQty) {
+        const qtyInput = document.getElementById('qty_' + idx);
+        if (!qtyInput) return;
+        let current = parseInt(qtyInput.value) || 0;
+        let updated = current + delta;
+        if (updated < 0) updated = 0;
+        if (updated > maxQty) updated = maxQty;
+        qtyInput.value = updated;
+        calculateReturnRow(idx, maxQty);
+    }
+
+    function setRowMax(idx, maxQty) {
+        const qtyInput = document.getElementById('qty_' + idx);
+        if (!qtyInput) return;
+        qtyInput.value = maxQty;
+        calculateReturnRow(idx, maxQty);
+    }
+
+    function setAllRowsMax() {
+        document.querySelectorAll('.ret-qty-input').forEach(input => {
+            const idx = input.id.replace('qty_', '');
+            const max = parseInt(input.getAttribute('max')) || 0;
+            input.value = max;
+            calculateReturnRow(idx, max);
+        });
     }
 
     function recalculateGrandRefund() {
@@ -619,16 +759,46 @@ if ($db_connected && $pdo) {
     }
 
     function toggleAccountDropdown() {
-        const type = document.getElementById('refundTypeSelect').value;
+        const typeSelect = document.getElementById('refundTypeSelect');
+        if (!typeSelect) return;
+        const type = typeSelect.value;
         const cBox = document.getElementById('cashAccountBox');
         const bBox = document.getElementById('bankAccountBox');
 
-        cBox.classList.add('d-none');
-        bBox.classList.add('d-none');
+        if (cBox) cBox.classList.add('d-none');
+        if (bBox) bBox.classList.add('d-none');
 
-        if (type === 'Cash Refund') cBox.classList.remove('d-none');
-        if (type === 'Bank Refund') bBox.classList.remove('d-none');
+        if (type === 'Cash Refund' && cBox) cBox.classList.remove('d-none');
+        if (type === 'Bank Refund' && bBox) bBox.classList.remove('d-none');
     }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const returnForm = document.getElementById('returnForm');
+        if (returnForm) {
+            returnForm.addEventListener('submit', function(e) {
+                const qtyInputs = document.querySelectorAll('.ret-qty-input');
+                if (qtyInputs.length === 0) {
+                    return; // No items loaded or fully returned
+                }
+
+                let totalReturnQty = 0;
+                qtyInputs.forEach(input => {
+                    totalReturnQty += (parseInt(input.value) || 0);
+                });
+
+                if (totalReturnQty <= 0) {
+                    e.preventDefault();
+                    alert('⚠️ Barahe karam kam az kam 1 item ki return quantity 1 ya zyada darj karein!\n(Please enter a return quantity of 1 or more for at least one item.)');
+                    const firstInput = document.querySelector('.ret-qty-input');
+                    if (firstInput) {
+                        firstInput.focus();
+                        firstInput.select();
+                    }
+                    return false;
+                }
+            });
+        }
+    });
 </script>
 
 <?php require_once __DIR__ . '/../../includes/footer.php'; ?>

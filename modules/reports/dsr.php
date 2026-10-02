@@ -287,7 +287,44 @@ foreach ($rows as $r) {
     }
 }
 
-$day_total  = array_sum(array_column($groups, 'grand_total'));
+// Fetch completed returns for invoices on this day
+$sale_ids = array_keys($groups);
+$returns_by_sale = [];
+if (!empty($sale_ids)) {
+    try {
+        $in_clause = implode(',', array_map('intval', $sale_ids));
+        $r_stmt = $pdo->query("
+            SELECT sr.sale_id,
+                   COALESCE(SUM(sri.total_price), 0) AS returned_sales,
+                   COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0) AS returned_cost
+            FROM sale_returns sr
+            JOIN sale_return_items sri ON sri.return_id = sr.id
+            LEFT JOIN products p ON p.id = sri.product_id
+            WHERE sr.status = 'Completed' AND (sr.sale_id IN ($in_clause) OR sr.invoice_id IN ($in_clause))
+            GROUP BY sr.sale_id
+        ");
+        foreach ($r_stmt->fetchAll(PDO::FETCH_ASSOC) as $rr) {
+            $returns_by_sale[(int)$rr['sale_id']] = [
+                'sales' => (float)$rr['returned_sales'],
+                'cost'  => (float)$rr['returned_cost']
+            ];
+        }
+    } catch (Exception $e) {}
+}
+
+foreach ($groups as $sid => &$grp) {
+    $ret_sales = (float)($returns_by_sale[$sid]['sales'] ?? 0);
+    $ret_cost  = (float)($returns_by_sale[$sid]['cost'] ?? 0);
+
+    $grp['returned_sales'] = $ret_sales;
+    $grp['returned_cost']  = $ret_cost;
+    $grp['net_sale']       = max(0.0, $grp['grand_total'] - $ret_sales);
+    $grp['net_cost']       = max(0.0, $grp['total_cost'] - $ret_cost);
+    $grp['profit']         = $grp['net_sale'] - $grp['net_cost'];
+}
+unset($grp);
+
+$day_total  = array_sum(array_column($groups, 'net_sale'));
 $day_paid   = array_sum(array_column($groups, 'paid_amount'));
 $day_due    = array_sum(array_column($groups, 'due_amount'));
 $day_profit = array_sum(array_column($groups, 'profit'));
@@ -443,7 +480,13 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
               <div class="small"><?= htmlspecialchars($it['product_name']) ?> &times; <?= $it['quantity'] ?> @ PKR <?= formatCurrency($it['unit_price']) ?></div>
               <?php endforeach; ?>
             </td>
-            <td class="text-right font-weight-bold">PKR <?= formatCurrency($g['grand_total']) ?></td>
+            <td class="text-right font-weight-bold">
+              PKR <?= formatCurrency($g['grand_total']) ?>
+              <?php if (!empty($g['returned_sales']) && $g['returned_sales'] > 0): ?>
+                <br><small class="text-danger"><i class="fas fa-undo"></i> Ret: -<?= formatCurrency($g['returned_sales']) ?></small>
+                <br><small class="text-primary font-weight-bold">Net: <?= formatCurrency($g['net_sale']) ?></small>
+              <?php endif; ?>
+            </td>
             <td class="text-right text-success">PKR <?= formatCurrency($g['paid_amount']) ?></td>
             <td class="text-right <?= $g['due_amount']>0?'text-danger':'text-muted' ?>">PKR <?= formatCurrency($g['due_amount']) ?></td>
             <td class="text-center">

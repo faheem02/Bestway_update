@@ -854,3 +854,8 @@ select.form-control, select.form-select {
 .row.g-3 > .col, .row.g-3 > [class*="col-"] { padding-left: 0.5rem; padding-right: 0.5rem; }
 .row.g-4 { margin-left: -0.75rem; margin-right: -0.75rem; }
 .row.g-4 > .col, .row.g-4 > [class*="col-"] { padding-left: 0.75rem; padding-right: 0.75rem; }
+
+/* ---- FontAwesome 6 compatibility for FA5 Free ---- */
+.fa-solid { font-family: "Font Awesome 5 Free" !important; font-weight: 900 !important; }
+.fa-regular { font-family: "Font Awesome 5 Free" !important; font-weight: 400 !important; }
+

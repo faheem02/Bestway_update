@@ -84,6 +84,10 @@ if ($db_connected && $pdo) {
     } catch (Exception $e) {}
 }
 
+// Logo image (inline data URI for instant, reliable print rendering)
+$logo_file = __DIR__ . '/../../assets/images/logo.png';
+$logo_src  = file_exists($logo_file) ? 'data:image/png;base64,' . base64_encode(file_get_contents($logo_file)) : (BASE_URL . 'assets/images/logo.png');
+
 $salesman_label = '';
 if ($booker_id > 0 && $db_connected && $pdo) {
     try {
@@ -242,15 +246,18 @@ foreach ($invoices as $inv) {
 
         <!-- Report Header -->
         <div class="report-header">
-            <div class="d-flex justify-content-between align-items-start">
-                <div>
-                    <h3 class="fw-bold mb-1 text-dark" style="letter-spacing: -0.5px;"><?= htmlspecialchars($biz_name) ?></h3>
-                    <div class="text-secondary small fw-semibold"><?= htmlspecialchars($biz_tag) ?></div>
-                    <div class="text-muted small mt-1">
-                        <i class="fa-solid fa-location-dot me-1"></i> <?= htmlspecialchars($biz_addr) ?>
-                        <?php if (!empty($biz_ph)): ?>
-                            &nbsp;|&nbsp; <i class="fa-solid fa-phone me-1"></i> <?= htmlspecialchars($biz_ph) ?>
-                        <?php endif; ?>
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center">
+                    <img src="<?= $logo_src ?>" alt="Bestway Distribution" style="height: 56px; max-width: 140px; object-fit: contain; margin-right: 18px;">
+                    <div>
+                        <h3 class="fw-bold mb-1 text-dark" style="letter-spacing: -0.5px;"><?= htmlspecialchars($biz_name) ?></h3>
+                        <div class="text-secondary small fw-semibold"><?= htmlspecialchars($biz_tag) ?></div>
+                        <div class="text-muted small mt-1">
+                            <i class="fa-solid fa-location-dot me-1"></i> <?= htmlspecialchars($biz_addr) ?>
+                            <?php if (!empty($biz_ph)): ?>
+                                &nbsp;|&nbsp; <i class="fa-solid fa-phone me-1"></i> <?= htmlspecialchars($biz_ph) ?>
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </div>
                 <div class="text-end">

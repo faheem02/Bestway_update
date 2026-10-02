@@ -156,6 +156,10 @@ $pay_method  = htmlspecialchars($invoice['payment_method'] ?? 'Credit');
 // Totals
 $total_qty = array_sum(array_column($items, 'quantity'));
 
+// Logo image (inline data URI for instant, reliable print rendering)
+$logo_file = __DIR__ . '/../../assets/images/logo.png';
+$logo_src  = file_exists($logo_file) ? 'data:image/png;base64,' . base64_encode(file_get_contents($logo_file)) : (BASE_URL . 'assets/images/logo.png');
+
 // Signature image (inline data URI for instant, reliable print rendering)
 $sign_file = __DIR__ . '/../../assets/images/sign.png';
 $sign_src = file_exists($sign_file) ? 'data:image/png;base64,' . base64_encode(file_get_contents($sign_file)) : (BASE_URL . 'assets/images/sign.png');
@@ -177,6 +181,7 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
 
 /* ── Header ─────────────────────────────────────────────────── */
 .inv-header { border-bottom:2px solid #10b981; padding-bottom:12px; margin-bottom:16px; }
+.inv-logo { max-height:60px; max-width:145px; object-fit:contain; }
 .company-name { font-size:20px; font-weight:800; color:#0f172a; text-transform:uppercase; letter-spacing:.5px; }
 .company-meta { font-size:11px; color:#475569; line-height:1.6; }
 .inv-title-box { text-align:right; }
@@ -216,7 +221,7 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
 .warranty-section .note { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:5px; padding:10px 12px; margin-top:12px; font-size:10.5px; }
 .warranty-sig-row { display:flex; justify-content:flex-end; margin-top:14px; }
 .warranty-sig-box { text-align:center; width:200px; }
-.warranty-sig-img { max-height:85px; max-width:140px; object-fit:contain; display:inline-block; margin-bottom:2px; }
+.warranty-sig-img { max-height:90px; max-width:160px; object-fit:contain; display:inline-block; margin-bottom:2px; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
 .warranty-sig-line { border-top:1px solid #0f172a; padding-top:4px; font-size:10px; font-weight:700; color:#0f172a; }
 
 /* ── Footer note ─────────────────────────────────────────────── */
@@ -307,17 +312,20 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
 
   <!-- ── HEADER ────────────────────────────────────────────────── -->
   <?php if ($type === 'warranty'): ?>
-  <!-- WARRANTY: Full company header -->
-  <div class="inv-header d-flex justify-content-between align-items-start">
-    <div>
-      <div class="company-name"><?= htmlspecialchars($company['name']) ?></div>
-      <div class="company-meta">
-        <i class="fas fa-map-marker-alt mr-1"></i><?= htmlspecialchars($company['address']) ?><br>
-        <i class="fas fa-phone mr-1"></i><?= htmlspecialchars($company['phone']) ?><br>
-        <?php if (!empty($company['drug_license_no'])): ?>
-        <i class="fas fa-id-card mr-1"></i><span class="text-nowrap">Company Drug Lic #:</span> <strong><?= htmlspecialchars($company['drug_license_no']) ?></strong>
-        &nbsp;|&nbsp;Valid up to: <strong><?= htmlspecialchars($company['drug_license_upto']) ?></strong>
-        <?php endif; ?>
+  <!-- WARRANTY: Full company header with logo -->
+  <div class="inv-header d-flex justify-content-between align-items-center">
+    <div class="d-flex align-items-center">
+      <img src="<?= $logo_src ?>" alt="Bestway Distribution" class="inv-logo mr-3">
+      <div>
+        <div class="company-name"><?= htmlspecialchars($company['name']) ?></div>
+        <div class="company-meta">
+          <i class="fas fa-map-marker-alt mr-1"></i><?= htmlspecialchars($company['address']) ?><br>
+          <i class="fas fa-phone mr-1"></i><?= htmlspecialchars($company['phone']) ?><br>
+          <?php if (!empty($company['drug_license_no'])): ?>
+          <i class="fas fa-id-card mr-1"></i><span class="text-nowrap">Company Drug Lic #:</span> <strong><?= htmlspecialchars($company['drug_license_no']) ?></strong>
+          &nbsp;|&nbsp;Valid up to: <strong><?= htmlspecialchars($company['drug_license_upto']) ?></strong>
+          <?php endif; ?>
+        </div>
       </div>
     </div>
     <div class="inv-title-box">
@@ -331,11 +339,17 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
     </div>
   </div>
   <?php else: ?>
-  <!-- SALE: No company header — just invoice title -->
+  <!-- SALE: Regular Sale Invoice with logo -->
   <div class="inv-header d-flex justify-content-between align-items-center">
-    <div>
-      <span class="inv-type-badge badge-sale">Sale Invoice</span>
-      <div class="inv-no mt-1"><?= $inv_no ?></div>
+    <div class="d-flex align-items-center">
+      <img src="<?= $logo_src ?>" alt="Bestway Distribution" class="inv-logo mr-3">
+      <div>
+        <div class="company-name" style="font-size:18px; margin-bottom:2px;"><?= htmlspecialchars($company['name']) ?></div>
+        <div class="d-flex align-items-center">
+          <span class="inv-type-badge badge-sale mb-0 mr-2">Sale Invoice</span>
+          <span class="inv-no"><?= $inv_no ?></span>
+        </div>
+      </div>
     </div>
     <div class="inv-title-box">
       <div class="inv-meta-small">
@@ -378,13 +392,13 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
   <table class="inv-table">
     <thead>
       <tr>
-        <th style="width:30px;" class="text-center">#</th>
-        <th>Medicine / Product</th>
-        <th class="text-center" style="width:65px;">Batch</th>
-        <th class="text-center" style="width:55px;">Qty (Pcs)</th>
-        <th class="text-right"  style="width:85px;">Rate</th>
+        <th style="width:28px;" class="text-center">#</th>
+        <th style="width:38%;">Medicine / Product</th>
+        <th class="text-center" style="width:115px; min-width:105px;">Batch</th>
+        <th class="text-center" style="width:60px;">Qty (Pcs)</th>
+        <th class="text-right"  style="width:80px;">Rate</th>
         <th class="text-center" style="width:50px;">Disc%</th>
-        <th class="text-right"  style="width:95px;">Amount</th>
+        <th class="text-right"  style="width:90px;">Amount</th>
       </tr>
     </thead>
     <tbody>
@@ -410,7 +424,7 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
           <?php if ($generic): ?><span class="text-muted"> — <?= $generic ?></span><?php endif; ?>
           <?php if ($company_nm): ?><br><small class="text-muted"><?= $company_nm ?></small><?php endif; ?>
         </td>
-        <td class="text-center"><small><?= $batch ?></small></td>
+        <td class="text-center font-monospace" style="white-space:nowrap; font-size:11px; font-weight:600;"><?= $batch ?></td>
         <td class="text-center font-weight-bold"><?= number_format($qty) ?></td>
         <td class="text-right font-monospace"><?= number_format($rate, 2) ?></td>
         <td class="text-center text-muted"><?= $disc > 0 ? $disc.'%' : '-' ?></td>

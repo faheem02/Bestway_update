@@ -305,7 +305,7 @@ if ($db_connected && $pdo) {
                                                 "payee" => $row["payee_name"] ?: "-",
                                                 "receipt_no" => $row["receipt_no"] ?: "-"
                                             ], JSON_HEX_APOS | JSON_HEX_QUOT), ENT_QUOTES, "UTF-8"); ?>)'>
-                                        <i class="fa-solid fa-eye text-info"></i>
+                                        <i class="fas fa-eye text-info"></i>
                                     </button>
 
                                     <!-- Print Button -->
@@ -313,14 +313,14 @@ if ($db_connected && $pdo) {
                                        target="_blank" 
                                        class="btn btn-outline-secondary" 
                                        title="Print Voucher">
-                                        <i class="fa-solid fa-print text-dark"></i>
+                                        <i class="fas fa-print text-dark"></i>
                                     </a>
 
                                     <!-- Edit Button -->
                                     <a href="<?php echo BASE_URL; ?>modules/expense/edit_expense.php?id=<?php echo $row['id']; ?>" 
                                        class="btn btn-outline-secondary" 
                                        title="Edit Expense">
-                                        <i class="fa-solid fa-edit text-primary"></i>
+                                        <i class="fas fa-edit text-primary"></i>
                                     </a>
 
                                     <!-- Delete Button -->
@@ -328,7 +328,7 @@ if ($db_connected && $pdo) {
                                        class="btn btn-outline-secondary" 
                                        title="Delete Expense" 
                                        onclick="return confirm('Are you sure you want to delete this expense?');">
-                                        <i class="fa-solid fa-trash text-danger"></i>
+                                        <i class="fas fa-trash-alt text-danger"></i>
                                     </a>
                                 </div>
                             </td>

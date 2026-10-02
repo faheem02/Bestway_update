@@ -110,8 +110,164 @@ if (!empty($params)) {
     $stmt_list->bind_param($types, ...$params);
 }
 $stmt_list->execute();
-$items_list = $stmt_list->get_result();
+$sales_items = $stmt_list->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt_list->close();
+
+// ---- Fetch Sales Returns matching the filter criteria ----
+$ret_where = ["sr.status = 'Completed'"];
+$ret_params = [];
+$ret_types = "";
+if (!empty($start_date) && !empty($end_date)) {
+    $ret_where[] = "((sr.return_date >= ? AND sr.return_date <= ?) OR (si.invoice_date >= ? AND si.invoice_date <= ?))";
+    $ret_params[] = $start_date;
+    $ret_params[] = $end_date;
+    $ret_params[] = $start_date;
+    $ret_params[] = $end_date;
+    $ret_types .= "ssss";
+} elseif (!empty($start_date)) {
+    $ret_where[] = "(sr.return_date >= ? OR si.invoice_date >= ?)";
+    $ret_params[] = $start_date;
+    $ret_params[] = $start_date;
+    $ret_types .= "ss";
+} elseif (!empty($end_date)) {
+    $ret_where[] = "(sr.return_date <= ? OR si.invoice_date <= ?)";
+    $ret_params[] = $end_date;
+    $ret_params[] = $end_date;
+    $ret_types .= "ss";
+}
+
+if ($area !== '') {
+    $ret_where[] = "(LOWER(si.route_name) = LOWER(?) OR LOWER(c.area) = LOWER(?))";
+    $ret_params[] = $area;
+    $ret_params[] = $area;
+    $ret_types .= "ss";
+}
+
+if ($salesman_id > 0) {
+    $ret_where[] = "si.booker_id = ?";
+    $ret_params[] = $salesman_id;
+    $ret_types .= "i";
+}
+
+$ret_where_sql = implode(" AND ", $ret_where);
+$ret_sql = "
+    SELECT 
+        sri.product_id,
+        COALESCE(p.product_code, '') AS product_code,
+        COALESCE(p.name, 'Item') AS product_name,
+        COALESCE(SUM(sri.quantity), 0) AS returned_qty,
+        COALESCE(SUM(sri.total_price), 0) AS returned_amount,
+        COALESCE(SUM(sri.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)), 0) AS returned_cost
+    FROM sale_returns sr
+    JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
+    LEFT JOIN sales_invoices si ON (si.id = sr.sale_id OR si.id = sr.invoice_id)
+    LEFT JOIN products p ON p.id = sri.product_id
+    LEFT JOIN product_batches pb ON pb.id = sri.batch_no
+    LEFT JOIN customers c ON c.id = COALESCE(sr.customer_id, si.customer_id)
+    WHERE {$ret_where_sql}
+    GROUP BY sri.product_id, p.product_code, p.name
+";
+
+$stmt_r = $conn->prepare($ret_sql);
+if (!empty($ret_params)) {
+    $stmt_r->bind_param($ret_types, ...$ret_params);
+}
+$stmt_r->execute();
+$returns_raw = $stmt_r->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt_r->close();
+
+$returns_by_product = [];
+$total_returned_qty = 0;
+$total_returned_amount = 0;
+$total_returned_cost = 0;
+
+foreach ($returns_raw as $rr) {
+    $r_pid = (int)$rr['product_id'];
+    $returns_by_product[$r_pid] = [
+        'qty'          => (float)$rr['returned_qty'],
+        'amount'       => (float)$rr['returned_amount'],
+        'cost'         => (float)$rr['returned_cost'],
+        'product_name' => $rr['product_name'],
+        'product_code' => $rr['product_code'],
+    ];
+    $total_returned_qty    += (float)$rr['returned_qty'];
+    $total_returned_amount += (float)$rr['returned_amount'];
+    $total_returned_cost   += (float)$rr['returned_cost'];
+}
+
+// Adjust Summary Metrics with Returns
+$summary['total_returned_qty']    = $total_returned_qty;
+$summary['total_returned_amount'] = $total_returned_amount;
+$summary['total_returned_cost']   = $total_returned_cost;
+
+$summary['net_sold_qty']          = $summary['total_qty'] - $total_returned_qty;
+$summary['net_sales_amount']      = $summary['total_net'] - $total_returned_amount;
+$summary['net_cost_amount']       = $summary['total_cost'] - $total_returned_cost;
+$summary['net_margin_amount']     = $summary['net_sales_amount'] - $summary['net_cost_amount'];
+
+// Merge Sales & Returns per Product
+$final_items = [];
+$seen_pids = [];
+
+foreach ($sales_items as $si) {
+    $pid = (int)$si['product_id'];
+    $seen_pids[$pid] = true;
+
+    $ret = $returns_by_product[$pid] ?? ['qty' => 0, 'amount' => 0, 'cost' => 0];
+    $sold_q  = (float)$si['total_qty'];
+    $ret_q   = (float)$ret['qty'];
+    $net_q   = max(0.0, $sold_q - $ret_q);
+
+    $gross_amt = (float)$si['gross_amount'];
+    $disc_amt  = (float)($si['gross_amount'] - $si['net_amount']);
+    $ret_amt   = (float)$ret['amount'];
+    $net_amt   = max(0.0, (float)$si['net_amount'] - $ret_amt);
+
+    $ret_cost  = (float)$ret['cost'];
+    $net_cost  = max(0.0, (float)$si['total_cost'] - $ret_cost);
+    $margin    = $net_amt - $net_cost;
+
+    $final_items[] = [
+        'product_id'      => $pid,
+        'item_name'       => $si['item_name'],
+        'product_code'    => $si['product_code'],
+        'invoice_count'   => (int)$si['invoice_count'],
+        'sold_qty'        => $sold_q,
+        'returned_qty'    => $ret_q,
+        'net_qty'         => $net_q,
+        'bonus_qty'       => (float)$si['total_bonus'],
+        'avg_rate'        => (float)$si['avg_unit_price'],
+        'avg_cost'        => (float)$si['avg_cost_price'],
+        'gross_amount'    => $gross_amt,
+        'discount_amount' => $disc_amt,
+        'returned_amount' => $ret_amt,
+        'net_amount'      => $net_amt,
+        'margin_amount'   => $margin,
+    ];
+}
+
+// Any products that had returns in this period but 0 sales
+foreach ($returns_by_product as $r_pid => $r_data) {
+    if (!isset($seen_pids[$r_pid]) && $r_data['qty'] > 0) {
+        $final_items[] = [
+            'product_id'      => $r_pid,
+            'item_name'       => $r_data['product_name'],
+            'product_code'    => $r_data['product_code'],
+            'invoice_count'   => 0,
+            'sold_qty'        => 0,
+            'returned_qty'    => (float)$r_data['qty'],
+            'net_qty'         => -(float)$r_data['qty'],
+            'bonus_qty'       => 0,
+            'avg_rate'        => ($r_data['qty'] > 0 ? round($r_data['amount'] / $r_data['qty'], 2) : 0),
+            'avg_cost'        => ($r_data['qty'] > 0 ? round($r_data['cost'] / $r_data['qty'], 2) : 0),
+            'gross_amount'    => 0,
+            'discount_amount' => 0,
+            'returned_amount' => (float)$r_data['amount'],
+            'net_amount'      => -(float)$r_data['amount'],
+            'margin_amount'   => -((float)$r_data['amount'] - (float)$r_data['cost']),
+        ];
+    }
+}
 
 // ---- Filter dropdowns ----
 $area_options   = [];
@@ -147,7 +303,7 @@ $report_orientation = "landscape";
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2 d-print-none">
         <div>
             <h4 class="fw-bold mb-1"><i class="fa-solid fa-cubes text-primary me-2"></i>Item Wise Sale Report</h4>
-            <span class="text-muted small">Product-wise sale quantity, gross, discount, net amounts and profit margin.</span>
+            <span class="text-muted small">Product-wise sale quantity, gross, discount, sales returns, net amounts and profit margin.</span>
         </div>
         <div class="d-flex gap-2">
             <button onclick="window.print()" class="btn btn-outline-secondary btn-sm shadow-sm">
@@ -173,7 +329,8 @@ $report_orientation = "landscape";
                 <div class="card-body p-3 d-flex justify-content-between align-items-center">
                     <div>
                         <span class="text-muted small fw-bold text-uppercase">Products Sold</span>
-                        <h4 class="fw-bold mb-0 text-dark"><?= number_format($summary['total_products']) ?></h4>
+                        <h4 class="fw-bold mb-0 text-dark"><?= number_format(count($final_items)) ?></h4>
+                        <span class="small text-muted">Invoices: <?= number_format($summary['total_invoices']) ?></span>
                     </div>
                     <div class="p-3 bg-primary-subtle text-primary rounded-circle"><i class="fa-solid fa-boxes fs-4"></i></div>
                 </div>
@@ -183,8 +340,9 @@ $report_orientation = "landscape";
             <div class="card border-0 shadow-sm rounded-3 h-100">
                 <div class="card-body p-3 d-flex justify-content-between align-items-center">
                     <div>
-                        <span class="text-muted small fw-bold text-uppercase">Total Qty</span>
-                        <h4 class="fw-bold mb-0 text-dark"><?= number_format($summary['total_qty']) ?> <small class="text-muted font-weight-normal">(+<?= number_format($summary['total_bonus']) ?>)</small></h4>
+                        <span class="text-muted small fw-bold text-uppercase">Net Sold Qty</span>
+                        <h4 class="fw-bold mb-0 text-dark"><?= number_format($summary['net_sold_qty']) ?> <small class="text-muted font-weight-normal">(+<?= number_format($summary['total_bonus']) ?>)</small></h4>
+                        <span class="small text-muted">Sold: <?= number_format($summary['total_qty']) ?> | <span class="text-danger fw-semibold">Ret: -<?= number_format($summary['total_returned_qty']) ?></span></span>
                     </div>
                     <div class="p-3 bg-info-subtle text-info rounded-circle"><i class="fa-solid fa-pills fs-4"></i></div>
                 </div>
@@ -194,8 +352,9 @@ $report_orientation = "landscape";
             <div class="card border-0 shadow-sm rounded-3 h-100">
                 <div class="card-body p-3 d-flex justify-content-between align-items-center">
                     <div>
-                        <span class="text-muted small fw-bold text-uppercase">Gross Amount</span>
+                        <span class="text-muted small fw-bold text-uppercase">Gross Sales</span>
                         <h4 class="fw-bold mb-0 text-primary">Rs. <?= number_format($summary['total_gross'], 2) ?></h4>
+                        <span class="small text-warning fw-semibold">Disc: Rs. <?= number_format($summary['total_discount'], 2) ?></span>
                     </div>
                     <div class="p-3 bg-secondary-subtle text-secondary rounded-circle"><i class="fa-solid fa-chart-line fs-4"></i></div>
                 </div>
@@ -205,9 +364,9 @@ $report_orientation = "landscape";
             <div class="card border-0 shadow-sm rounded-3 h-100">
                 <div class="card-body p-3 d-flex justify-content-between align-items-center">
                     <div>
-                        <span class="text-muted small fw-bold text-uppercase">Net Sale</span>
-                        <h4 class="fw-bold mb-0 text-dark">Rs. <?= number_format($summary['total_net'], 2) ?></h4>
-                        <span class="small text-warning fw-semibold">Disc: Rs. <?= number_format($summary['total_discount'], 2) ?></span>
+                        <span class="text-muted small fw-bold text-uppercase">Net Sales</span>
+                        <h4 class="fw-bold mb-0 text-dark">Rs. <?= number_format($summary['net_sales_amount'], 2) ?></h4>
+                        <span class="small text-danger fw-semibold">Returns: -Rs. <?= number_format($summary['total_returned_amount'], 2) ?></span>
                     </div>
                     <div class="p-3 bg-warning-subtle text-warning rounded-circle"><i class="fa-solid fa-money-bill-wave fs-4"></i></div>
                 </div>
@@ -219,10 +378,10 @@ $report_orientation = "landscape";
                     <div>
                         <span class="text-muted small fw-bold text-uppercase">Total Profit / Margin</span>
                         <?php 
-                        $margin_color = $summary['total_margin'] >= 0 ? 'text-success' : 'text-danger';
+                        $margin_color = $summary['net_margin_amount'] >= 0 ? 'text-success' : 'text-danger';
                         ?>
-                        <h4 class="fw-bold mb-0 <?= $margin_color ?>">Rs. <?= number_format($summary['total_margin'], 2) ?></h4>
-                        <span class="small text-muted fw-semibold">Cost: Rs. <?= number_format($summary['total_cost'], 2) ?></span>
+                        <h4 class="fw-bold mb-0 <?= $margin_color ?>">Rs. <?= number_format($summary['net_margin_amount'], 2) ?></h4>
+                        <span class="small text-muted fw-semibold">Cost: Rs. <?= number_format($summary['net_cost_amount'], 2) ?></span>
                     </div>
                     <div class="p-3 bg-success-subtle text-success rounded-circle"><i class="fa-solid fa-hand-holding-dollar fs-4"></i></div>
                 </div>
@@ -280,7 +439,7 @@ $report_orientation = "landscape";
     <div class="card border-0 shadow-sm">
         <div class="card-header bg-white py-3 border-0 d-flex justify-content-between align-items-center">
             <h6 class="fw-bold mb-0 text-dark">
-                <i class="fa-solid fa-cubes text-primary me-2"></i>Product Sales Breakdown (<?php echo $items_list->num_rows; ?> Items)
+                <i class="fa-solid fa-cubes text-primary me-2"></i>Product Sales &amp; Return Breakdown (<?= count($final_items) ?> Items)
             </h6>
         </div>
         <div class="table-responsive">
@@ -291,19 +450,22 @@ $report_orientation = "landscape";
                         <th>Item Name</th>
                         <th>Code</th>
                         <th class="text-center">Invoices</th>
-                        <th class="text-center">Qty</th>
+                        <th class="text-center">Sold Qty</th>
+                        <th class="text-center">Ret Qty</th>
+                        <th class="text-center">Net Qty</th>
                         <th class="text-center">Bonus</th>
                         <th class="text-end">Avg Rate</th>
                         <th class="text-end">Avg Cost</th>
                         <th class="text-end">Gross Amount</th>
                         <th class="text-end">Discount</th>
+                        <th class="text-end">Return Amount</th>
                         <th class="text-end">Net Amount</th>
                         <th class="text-end">Profit / Margin</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <?php if ($items_list->num_rows > 0): ?>
-                        <?php $idx = 1; while ($row = $items_list->fetch_assoc()): 
+                    <?php if (!empty($final_items)): ?>
+                        <?php $idx = 1; foreach ($final_items as $row): 
                             $row_margin = (float)($row['margin_amount'] ?? 0);
                             $margin_text_color = $row_margin >= 0 ? 'text-success' : 'text-danger';
                         ?>
@@ -314,40 +476,70 @@ $report_orientation = "landscape";
                                 </td>
                                 <td><span class="badge bg-light text-dark border font-monospace"><?= htmlspecialchars($row['product_code'] ?: '-') ?></span></td>
                                 <td class="text-center"><?= number_format($row['invoice_count']) ?></td>
-                                <td class="text-center fw-bold text-dark"><?= number_format($row['total_qty']) ?></td>
-                                <td class="text-center text-muted"><?= number_format($row['total_bonus']) ?></td>
-                                <td class="text-end text-muted">Rs. <?= number_format($row['avg_unit_price'], 2) ?></td>
-                                <td class="text-end text-muted">Rs. <?= number_format($row['avg_cost_price'], 2) ?></td>
+                                <td class="text-center text-muted"><?= number_format($row['sold_qty']) ?></td>
+                                <td class="text-center">
+                                    <?php if ($row['returned_qty'] > 0): ?>
+                                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle font-monospace">-<?= number_format($row['returned_qty']) ?></span>
+                                    <?php else: ?>
+                                        <span class="text-muted">0</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="text-center fw-bold text-dark"><?= number_format($row['net_qty']) ?></td>
+                                <td class="text-center text-muted"><?= number_format($row['bonus_qty']) ?></td>
+                                <td class="text-end text-muted">Rs. <?= number_format($row['avg_rate'], 2) ?></td>
+                                <td class="text-end text-muted">Rs. <?= number_format($row['avg_cost'], 2) ?></td>
                                 <td class="text-end text-dark">Rs. <?= number_format($row['gross_amount'], 2) ?></td>
-                                <td class="text-end text-warning">Rs. <?= number_format($row['gross_amount'] - $row['net_amount'], 2) ?></td>
+                                <td class="text-end text-warning">Rs. <?= number_format($row['discount_amount'], 2) ?></td>
+                                <td class="text-end">
+                                    <?php if ($row['returned_amount'] > 0): ?>
+                                        <span class="text-danger fw-semibold font-monospace">-Rs. <?= number_format($row['returned_amount'], 2) ?></span>
+                                    <?php else: ?>
+                                        <span class="text-muted">-</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="text-end fw-bold text-dark">Rs. <?= number_format($row['net_amount'], 2) ?></td>
                                 <td class="text-end fw-bold <?= $margin_text_color ?>">Rs. <?= number_format($row_margin, 2) ?></td>
                             </tr>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     <?php else: ?>
                         <tr>
-                            <td colspan="12" class="text-center py-5 text-muted">
+                            <td colspan="15" class="text-center py-5 text-muted">
                                 <i class="fa-solid fa-box-open fs-2 mb-2 d-block text-secondary opacity-50"></i>
                                 No sale items found for the selected criteria.
                             </td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
-                <?php if ($items_list->num_rows > 0): ?>
+                <?php if (!empty($final_items)): ?>
                 <?php 
-                $tot_margin_color = $summary['total_margin'] >= 0 ? 'text-success' : 'text-danger';
+                $tot_margin_color = $summary['net_margin_amount'] >= 0 ? 'text-success' : 'text-danger';
                 ?>
                 <tfoot class="table-light fw-bold">
                     <tr>
                         <td colspan="4" class="text-end">Totals:</td>
                         <td class="text-center"><?= number_format($summary['total_qty']) ?></td>
+                        <td class="text-center text-danger">
+                            <?php if ($summary['total_returned_qty'] > 0): ?>
+                                -<?= number_format($summary['total_returned_qty']) ?>
+                            <?php else: ?>
+                                0
+                            <?php endif; ?>
+                        </td>
+                        <td class="text-center text-dark"><?= number_format($summary['net_sold_qty']) ?></td>
                         <td class="text-center text-muted"><?= number_format($summary['total_bonus']) ?></td>
                         <td class="text-end text-muted">-</td>
                         <td class="text-end text-muted">-</td>
                         <td class="text-end">Rs. <?= number_format($summary['total_gross'], 2) ?></td>
                         <td class="text-end text-warning">Rs. <?= number_format($summary['total_discount'], 2) ?></td>
-                        <td class="text-end text-dark">Rs. <?= number_format($summary['total_net'], 2) ?></td>
-                        <td class="text-end <?= $tot_margin_color ?>">Rs. <?= number_format($summary['total_margin'], 2) ?></td>
+                        <td class="text-end text-danger">
+                            <?php if ($summary['total_returned_amount'] > 0): ?>
+                                -Rs. <?= number_format($summary['total_returned_amount'], 2) ?>
+                            <?php else: ?>
+                                -
+                            <?php endif; ?>
+                        </td>
+                        <td class="text-end text-dark">Rs. <?= number_format($summary['net_sales_amount'], 2) ?></td>
+                        <td class="text-end <?= $tot_margin_color ?>">Rs. <?= number_format($summary['net_margin_amount'], 2) ?></td>
                     </tr>
                 </tfoot>
                 <?php endif; ?>

@@ -47,8 +47,39 @@ try {
     foreach ($c_stmt->fetchAll() as $rc) { $booker_costs[(int)$rc['booker_id']] = (float)$rc['total_cost']; }
 } catch (Exception $e) {}
 
+// Return sales and return cost per booker (completed returns deduct from sales and restore cost)
+$booker_returns = [];
+try {
+    $r_stmt = $pdo->query("
+        SELECT si.booker_id,
+               COALESCE(SUM(sri.total_price), 0) AS returned_sales,
+               COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0) AS returned_cost
+        FROM sale_returns sr
+        JOIN sale_return_items sri ON sri.return_id = sr.id
+        JOIN sales_invoices si ON (si.id = sr.sale_id OR (sr.sale_id IS NULL AND si.id = sr.invoice_id))
+        LEFT JOIN products p ON p.id = sri.product_id
+        WHERE sr.status = 'Completed' AND si.booker_id IS NOT NULL
+        GROUP BY si.booker_id
+    ");
+    foreach ($r_stmt->fetchAll(PDO::FETCH_ASSOC) as $rr) {
+        $booker_returns[(int)$rr['booker_id']] = [
+            'sales' => (float)$rr['returned_sales'],
+            'cost'  => (float)$rr['returned_cost']
+        ];
+    }
+} catch (Exception $e) {}
+
 foreach ($all_bookers as &$bk) {
-    $bk['total_cost'] = $booker_costs[(int)$bk['id']] ?? 0.0;
+    $bkid = (int)$bk['id'];
+    $raw_sales = (float)$bk['total_sales'];
+    $raw_cost  = (float)($booker_costs[$bkid] ?? 0.0);
+    $ret_sales = (float)($booker_returns[$bkid]['sales'] ?? 0.0);
+    $ret_cost  = (float)($booker_returns[$bkid]['cost'] ?? 0.0);
+
+    $bk['gross_sales']    = $raw_sales;
+    $bk['returned_sales'] = $ret_sales;
+    $bk['total_sales']    = max(0.0, $raw_sales - $ret_sales);
+    $bk['total_cost']     = max(0.0, $raw_cost - $ret_cost);
 }
 unset($bk);
 
@@ -86,7 +117,16 @@ if ($ob !== '') {
                    b.id AS ob_id, b.name AS order_taker_name,
                    (SELECT COALESCE(SUM(p.purchase_price * s2.quantity), 0)
                     FROM sale_items s2 JOIN products p ON p.id = s2.product_id
-                    WHERE s2.invoice_id = si.id) AS total_cost
+                    WHERE s2.invoice_id = si.id) AS total_cost,
+                   (SELECT COALESCE(SUM(sri.total_price), 0)
+                    FROM sale_returns sr JOIN sale_return_items sri ON sri.return_id = sr.id
+                    WHERE (sr.sale_id = si.id OR (sr.sale_id IS NULL AND sr.invoice_id = si.id))
+                      AND sr.status = 'Completed') AS returned_amount,
+                   (SELECT COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0)
+                    FROM sale_returns sr JOIN sale_return_items sri ON sri.return_id = sr.id
+                    LEFT JOIN products p ON p.id = sri.product_id
+                    WHERE (sr.sale_id = si.id OR (sr.sale_id IS NULL AND sr.invoice_id = si.id))
+                      AND sr.status = 'Completed') AS returned_cost
             FROM sales_invoices si
             LEFT JOIN customers c ON c.id = si.customer_id
             LEFT JOIN employees b ON b.id = si.booker_id
@@ -111,15 +151,25 @@ if ($ob !== '') {
     } catch (Exception $e) { $sales = []; }
 
     foreach ($sales as &$s) {
-        $sale_amt = (float)$s['grand_total'];
-        $cost_amt = (float)$s['total_cost'];
-        $profit   = $sale_amt - $cost_amt;
-        $margin   = $sale_amt > 0 ? ($profit / $sale_amt) * 100 : 0;
-        $s['calc_profit'] = $profit;
-        $s['calc_margin'] = $margin;
+        $gross_sale = (float)$s['grand_total'];
+        $gross_cost = (float)$s['total_cost'];
+        $ret_amt    = (float)($s['returned_amount'] ?? 0);
+        $ret_cost   = (float)($s['returned_cost'] ?? 0);
 
-        $total_sales  += $sale_amt;
-        $total_cost   += $cost_amt;
+        $net_sale   = max(0.0, $gross_sale - $ret_amt);
+        $net_cost   = max(0.0, $gross_cost - $ret_cost);
+        $profit     = $net_sale - $net_cost;
+        $margin     = $net_sale > 0 ? ($profit / $net_sale) * 100 : 0;
+
+        $s['calc_profit']   = $profit;
+        $s['calc_margin']   = $margin;
+        $s['net_sale']      = $net_sale;
+        $s['net_cost']      = $net_cost;
+        $s['ret_amt']       = $ret_amt;
+        $s['returned_cost'] = $ret_cost;
+
+        $total_sales  += $net_sale;
+        $total_cost   += $net_cost;
         $total_profit += $profit;
         $total_paid   += (float)$s['paid_amount'];
         $total_due    += (float)$s['balance_due'];
@@ -480,11 +530,26 @@ if (!empty($_SESSION['user_id'])) {
                     </td>
                     <td><?= htmlspecialchars($s['customer_area'] ?: '—') ?></td>
                     <td><?= htmlspecialchars($s['route_name'] ?: '—') ?></td>
-                    <td class="text-right font-weight-bold">PKR <?= formatCurrency($s['grand_total']) ?></td>
-                    <td class="text-right text-muted">PKR <?= formatCurrency($s['total_cost']) ?></td>
+                    <td class="text-right font-weight-bold">
+                      PKR <?= formatCurrency($s['grand_total']) ?>
+                      <?php if (!empty($s['ret_amt']) && $s['ret_amt'] > 0): ?>
+                        <br><small class="text-danger font-weight-normal"><i class="fas fa-undo"></i> Ret: -<?= formatCurrency($s['ret_amt']) ?></small>
+                        <br><small class="text-primary font-weight-bold">Net: <?= formatCurrency($s['net_sale']) ?></small>
+                      <?php endif; ?>
+                    </td>
+                    <td class="text-right text-muted">
+                      PKR <?= formatCurrency($s['net_cost']) ?>
+                      <?php if (!empty($s['ret_amt']) && $s['ret_amt'] > 0 && ($s['returned_cost'] ?? 0) > 0): ?>
+                        <br><small class="text-muted">(Gross: <?= formatCurrency($s['total_cost']) ?>)</small>
+                      <?php endif; ?>
+                    </td>
                     <td class="text-right font-weight-bold <?= $s['calc_profit'] >= 0 ? 'text-success' : 'text-danger' ?>">
                       PKR <?= formatCurrency($s['calc_profit']) ?>
-                      <br><span class="badge badge-pill <?= $s['calc_margin'] >= 0 ? 'badge-success' : 'badge-danger' ?>" style="font-size: 0.7rem;"><?= number_format($s['calc_margin'], 1) ?>%</span>
+                      <?php if (!empty($s['ret_amt']) && $s['ret_amt'] > 0 && $s['net_sale'] <= 0): ?>
+                        <br><span class="badge badge-warning" style="font-size: 0.7rem;"><i class="fas fa-undo"></i> Fully Returned</span>
+                      <?php else: ?>
+                        <br><span class="badge badge-pill <?= $s['calc_margin'] >= 0 ? 'badge-success' : 'badge-danger' ?>" style="font-size: 0.7rem;"><?= number_format($s['calc_margin'], 1) ?>%</span>
+                      <?php endif; ?>
                     </td>
                     <td class="text-right text-success">PKR <?= formatCurrency($s['paid_amount']) ?></td>
                     <td class="text-right <?= $s['balance_due'] > 0 ? 'text-danger font-weight-bold' : 'text-muted' ?>">PKR <?= formatCurrency($s['balance_due']) ?></td>
@@ -654,11 +719,17 @@ $(document).ready(function(){
       $.each(res.items, function(i, item){
         var profitClass = item.profit >= 0 ? 'text-success' : 'text-danger';
         var badgeClass = item.margin_pct >= 0 ? 'badge-success' : 'badge-danger';
+        var qtyHtml = item.quantity + ' <br><small class="text-muted">' + item.packaging_label + '</small>';
+        if (item.returned_qty > 0) {
+          qtyHtml = '<div>' + item.quantity + ' sold</div>' +
+                    '<span class="badge badge-danger">-' + item.returned_qty + ' returned</span>' +
+                    '<div class="small font-weight-bold text-success">Net: ' + item.net_qty + '</div>';
+        }
         var tr = '<tr>' +
           '<td><strong>' + item.product_name + '</strong></td>' +
-          '<td class="text-center">' + item.quantity + ' <br><small class="text-muted">' + item.packaging_label + '</small></td>' +
+          '<td class="text-center">' + qtyHtml + '</td>' +
           '<td class="text-right">PKR ' + parseFloat(item.sale_price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
-          '<td class="text-right font-weight-bold">PKR ' + parseFloat(item.sale_subtotal).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+          '<td class="text-right font-weight-bold">PKR ' + parseFloat(item.sale_subtotal).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + (item.returned_qty > 0 ? '<br><small class="text-muted">Gross: ' + parseFloat(item.gross_subtotal).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</small>' : '') + '</td>' +
           '<td class="text-right">PKR ' + parseFloat(item.cost_per_unit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + ' <br><small class="text-muted">Rate: ' + parseFloat(item.purchase_price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</small></td>' +
           '<td class="text-right text-muted">PKR ' + parseFloat(item.cost_total).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
           '<td class="text-right font-weight-bold ' + profitClass + '">PKR ' + parseFloat(item.profit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
@@ -670,13 +741,21 @@ $(document).ready(function(){
       var netProfitClass = res.net_profit >= 0 ? 'text-success' : 'text-danger';
       var netBadgeClass = res.margin_pct >= 0 ? 'badge-success' : 'badge-danger';
       var tfootHtml = '<tr>' +
-        '<td colspan="3" class="text-right text-uppercase">Total:</td>' +
-        '<td class="text-right">PKR ' + parseFloat(res.total_sale).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+        '<td colspan="3" class="text-right text-uppercase font-weight-bold">Net Total:</td>' +
+        '<td class="text-right font-weight-bold">PKR ' + parseFloat(res.total_sale).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
         '<td></td>' +
         '<td class="text-right">PKR ' + parseFloat(res.total_cost).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
-        '<td class="text-right ' + netProfitClass + '">PKR ' + parseFloat(res.net_profit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+        '<td class="text-right ' + netProfitClass + ' font-weight-bold">PKR ' + parseFloat(res.net_profit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
         '<td class="text-center"><span class="badge ' + netBadgeClass + '">' + res.margin_pct + '%</span></td>' +
         '</tr>';
+
+      if (res.total_returned > 0) {
+        tfootHtml += '<tr class="text-danger small bg-light">' +
+          '<td colspan="3" class="text-right font-weight-bold"><i class="fas fa-undo mr-1"></i> Sale Returns Deducted:</td>' +
+          '<td class="text-right text-danger font-weight-bold">- PKR ' + parseFloat(res.total_returned).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+          '<td colspan="4"><small class="text-muted">(Gross Billed: PKR ' + parseFloat(res.gross_sale).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + ')</small></td>' +
+          '</tr>';
+      }
 
       if (res.discount_amount > 0) {
         tfootHtml += '<tr class="text-muted small">' +

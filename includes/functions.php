@@ -539,6 +539,18 @@ if (!function_exists('isSalesTeam')) {
         return in_array($role, ['manager', 'operator', 'salesman'], true);
     }
 }
+if (!function_exists('isSalesman')) {
+    function isSalesman() {
+        $role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
+        return in_array($role, ['salesman', 'salesperson', 'order_booker', 'booker'], true);
+    }
+}
+if (!function_exists('canAddCustomer')) {
+    function canAddCustomer() {
+        $role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
+        return in_array($role, ['admin', 'manager', 'operator', 'salesman', 'salesperson', 'order_booker', 'booker'], true);
+    }
+}
 if (!function_exists('requireRole')) {
     function requireRole(array $roles = ['admin']) {
         $role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
@@ -549,13 +561,6 @@ if (!function_exists('requireRole')) {
             header('Location: ' . $target);
             exit;
         }
-    }
-}
-
-if (!function_exists('isSalesTeam')) {
-    function isSalesTeam() {
-        $role = strtolower($_SESSION['user_role'] ?? '');
-        return in_array($role, ['salesman'], true);
     }
 }
 

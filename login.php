@@ -93,7 +93,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: ' . BASE_URL . 'index.php');
                 exit;
             } else {
-                $error_message = 'Invalid credentials or database offline. Default: admin / admin1234';
+                $error_message = 'Invalid credentials or database offline.';
             }
         }
     }
@@ -187,18 +187,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </button>
           </form>
 
-          <hr class="my-4">
-
-          <!-- Quick Credentials -->
-          <div class="d-flex align-items-center justify-content-between p-3 rounded" style="background:#f8fafc;border:1px dashed #cbd5e1;">
-            <div class="small text-muted">
-              <strong>Default:</strong> admin / admin1234
-            </div>
-            <button type="button" class="btn btn-sm btn-outline-primary" id="btnAutoFill">
-              <i class="fas fa-magic mr-1"></i> Auto Fill
-            </button>
-          </div>
-
           <p class="text-center text-muted small mt-4 mb-0">
             &copy; <?= date('Y') ?> Bestway Distribution. All rights reserved.
           </p>
@@ -223,12 +211,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       pwd.type = 'password';
       icon.classList.replace('fa-eye-slash', 'fa-eye');
     }
-  });
-
-  // Auto-fill credentials
-  document.getElementById('btnAutoFill').addEventListener('click', function () {
-    document.querySelector('input[name="username"]').value = 'admin';
-    document.getElementById('passwordInput').value = 'admin1234';
   });
 
   // Loading state on submit

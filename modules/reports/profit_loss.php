@@ -26,7 +26,45 @@ $stmt_sales->close();
 
 $gross_sales = (float)$sales_data['gross_sales'];
 $sales_discounts = (float)$sales_data['sales_discounts'];
-$net_sales = (float)$sales_data['net_sales'];
+$invoiced_sales = (float)$sales_data['net_sales'];
+
+// 1b. Fetch Sales Returns during this period (completed returns)
+$sales_returns = 0.0;
+$cost_of_returns = 0.0;
+$returns_by_product = [];
+
+$stmt_ret = $conn->prepare("
+    SELECT 
+        sri.product_id,
+        COALESCE(SUM(sri.quantity), 0) AS returned_qty,
+        COALESCE(SUM(sri.total_price), 0) AS returned_sales,
+        COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0) AS returned_cost
+    FROM sale_returns sr
+    JOIN sale_return_items sri ON sri.return_id = sr.id
+    LEFT JOIN products p ON p.id = sri.product_id
+    WHERE sr.status = 'Completed'
+      AND sr.return_date BETWEEN ? AND ?
+    GROUP BY sri.product_id
+");
+if ($stmt_ret) {
+    $stmt_ret->bind_param("ss", $start_date, $end_date);
+    $stmt_ret->execute();
+    $res_ret = $stmt_ret->get_result();
+    while ($r_row = $res_ret->fetch_assoc()) {
+        $r_pid = (int)$r_row['product_id'];
+        $returns_by_product[$r_pid] = [
+            'qty'   => (float)$r_row['returned_qty'],
+            'sales' => (float)$r_row['returned_sales'],
+            'cost'  => (float)$r_row['returned_cost']
+        ];
+        $sales_returns   += (float)$r_row['returned_sales'];
+        $cost_of_returns += (float)$r_row['returned_cost'];
+    }
+    $stmt_ret->close();
+}
+
+// True Net Sales = Invoiced Sales minus Sales Returns
+$net_sales = max(0.0, $invoiced_sales - $sales_returns);
 
 // 2. Fetch Cost of Goods Sold (COGS) from sold items joined with product purchase price
 // Using cross-database join if possible, or querying product prices
@@ -53,8 +91,13 @@ if ($stmt_items) {
     $stmt_items->execute();
     $res_items = $stmt_items->get_result();
     while ($row = $res_items->fetch_assoc()) {
-        $qty = (float)$row['total_qty'];
-        $rev = (float)$row['total_revenue'];
+        $pid   = (int)$row['product_id'];
+        $ret_q = (float)($returns_by_product[$pid]['qty'] ?? 0);
+        $ret_s = (float)($returns_by_product[$pid]['sales'] ?? 0);
+
+        // Net quantity and net revenue for this product after returns
+        $qty = max(0.0, (float)$row['total_qty'] - $ret_q);
+        $rev = max(0.0, (float)$row['total_revenue'] - $ret_s);
         $cost_unit = (float)$row['cost_price'];
         
         // If cost price not recorded, fallback to trade price * 0.85
@@ -68,6 +111,10 @@ if ($stmt_items) {
         $line_profit = $rev - $line_cost;
         $cogs += $line_cost;
 
+        $row['total_qty'] = $qty;
+        $row['total_revenue'] = $rev;
+        $row['returned_qty'] = $ret_q;
+        $row['returned_revenue'] = $ret_s;
         $row['calculated_cost'] = $line_cost;
         $row['calculated_profit'] = $line_profit;
         $row['profit_margin'] = ($rev > 0) ? ($line_profit / $rev * 100) : 0;
@@ -207,8 +254,15 @@ $report_orientation = "portrait";
                         <td class="text-end text-danger">(<?php echo number_format($sales_discounts, 2); ?>)</td>
                         <td></td>
                     </tr>
+                    <?php if ($sales_returns > 0): ?>
+                    <tr>
+                        <td class="ps-4 text-danger"><em>Less: Sales Returns & Refunds Deducted</em></td>
+                        <td class="text-end text-danger">(<?php echo number_format($sales_returns, 2); ?>)</td>
+                        <td></td>
+                    </tr>
+                    <?php endif; ?>
                     <tr class="fw-bold">
-                        <td class="ps-4 text-dark">Net Sales Revenue</td>
+                        <td class="ps-4 text-dark">Net Sales Revenue (after Returns)</td>
                         <td></td>
                         <td class="text-end text-dark fs-6"><?php echo number_format($net_sales, 2); ?></td>
                     </tr>
