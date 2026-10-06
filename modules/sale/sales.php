@@ -540,9 +540,11 @@ if ($db_connected && $pdo) {
                                 <a href="edit_sale.php?id=<?= $inv['id'] ?>" class="btn btn-light btn-sm action-btn text-warning border" title="Edit Sale">
                                     <i class="fa-solid fa-edit"></i>
                                 </a>
+                                <?php if (isAdmin()): ?>
                                 <a href="sale_return.php?invoice_id=<?= $inv['id'] ?>" class="btn btn-light btn-sm action-btn text-success border" title="Sale Return">
                                     <i class="fa-solid fa-undo"></i>
                                 </a>
+                                <?php endif; ?>
                                 <a href="sales.php?action=delete&id=<?= $inv['id'] ?>" class="btn btn-light btn-sm action-btn text-danger border" onclick="return confirm('Are you sure you want to delete Invoice #<?= htmlspecialchars($inv['invoice_no']) ?>? Sold stock will be restored to inventory.')" title="Delete Sale">
                                     <i class="fa-solid fa-trash"></i>
                                 </a>

@@ -40,8 +40,8 @@ $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
         <div class="collapse-inner">
           <a class="collapse-item <?= $current_page == 'new_sale.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/sale/new_sale.php"><i class="fas fa-plus-circle"></i> Add Sale</a>
           <a class="collapse-item <?= $current_page == 'sales.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/sale/sales.php"><i class="fas fa-list"></i> View All Sales</a>
-          <a class="collapse-item <?= $current_page == 'sale_return.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/sale/sale_return.php"><i class="fas fa-undo"></i> Sale Return</a>
           <?php if (isAdmin()): ?>
+          <a class="collapse-item <?= $current_page == 'sale_return.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/sale/sale_return.php"><i class="fas fa-undo"></i> Sale Return</a>
           <a class="collapse-item <?= $current_page == 'order_booker_invoices.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/sale/order_booker_invoices.php"><i class="fas fa-user-tag"></i> Salesman Invoices</a>
           <?php endif; ?>
         </div>
@@ -68,7 +68,8 @@ $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
     </div>
     <?php endif; ?>
 
-    <!-- Product (Admin: Full | Salesman: View only) -->
+    <!-- Product (Admin only) -->
+    <?php if (isAdmin()): ?>
     <?php $on_product = ($current_dir == 'product'); ?>
     <div class="nav-item">
       <a class="nav-link <?= !$on_product ? 'collapsed' : '' ?>" data-toggle="collapse" href="#collapseProduct" role="button" aria-expanded="<?= $on_product ? 'true' : 'false' ?>">
@@ -78,18 +79,15 @@ $current_dir  = basename(dirname($_SERVER['PHP_SELF']));
       </a>
       <div class="collapse <?= $on_product ? 'show' : '' ?>" id="collapseProduct">
         <div class="collapse-inner">
-          <?php if (isAdmin()): ?>
           <a class="collapse-item <?= $current_page == 'add_product.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/product/add_product.php"><i class="fas fa-plus-circle"></i> Add Product</a>
-          <?php endif; ?>
           <a class="collapse-item <?= $current_page == 'view_product_list.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/product/view_product_list.php"><i class="fas fa-list"></i> View Product List</a>
-          <?php if (isAdmin()): ?>
           <a class="collapse-item <?= $current_page == 'add_company.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/product/add_company.php"><i class="fas fa-industry"></i> Add Company</a>
           <a class="collapse-item <?= $current_page == 'add_category.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/product/add_category.php"><i class="fas fa-tags"></i> Add Category</a>
           <a class="collapse-item <?= $current_page == 'add_opening_stock.php' ? 'active' : '' ?>" href="<?= BASE_URL ?>modules/product/add_opening_stock.php"><i class="fas fa-boxes"></i> Opening Stock</a>
-          <?php endif; ?>
         </div>
       </div>
     </div>
+    <?php endif; ?>
 
     <!-- Customer -->
     <?php $on_customer = ($current_dir == 'customer'); ?>

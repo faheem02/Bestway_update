@@ -26,7 +26,7 @@ if ($id <= 0) {
 
 // Fetch invoice details
 $stmt = $conn->prepare("
-    SELECT si.*, c.invoice_type AS customer_invoice_type, c.license_number, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type, COALESCE(ri.returned, 0) AS returned_amount
+    SELECT si.*, c.name AS customer_person_name, c.shop_name, c.phone AS customer_phone, c.address AS customer_address, c.area AS customer_area, c.invoice_type AS customer_invoice_type, c.license_number, e.commission_rate AS salesman_commission_rate, e.employee_type AS salesman_type, COALESCE(ri.returned, 0) AS returned_amount
     FROM sales_invoices si
     " . getReturnNetJoinSql('si') . "
     LEFT JOIN customers c ON (c.id = si.customer_id OR (si.customer_id IS NULL AND (c.name = si.customer_name OR c.shop_name = si.customer_name)))
@@ -159,71 +159,137 @@ if ($inv_balance <= 0.01) {
         <a href="edit_sale.php?id=<?= $invoice['id'] ?>" class="btn btn-sm btn-outline-warning text-dark bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-edit me-1"></i> Edit
         </a>
+        <?php if (isAdmin()): ?>
         <a href="sale_return.php?invoice_id=<?= $invoice['id'] ?>" class="btn btn-sm btn-outline-danger bg-white fw-semibold shadow-sm px-3 rounded-3">
             <i class="fa-solid fa-undo me-1"></i> Return Items
         </a>
+        <?php endif; ?>
     </div>
 </div>
 
 <div class="invoice-view-card p-4 p-md-5 mb-4">
 
-    <!-- Invoice Header Meta -->
-    <div class="row g-4 pb-4 border-bottom mb-4 align-items-center">
-        <div class="col-md-6">
-            <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-3 py-2 font-monospace fs-6 mb-2">
+    <!-- Invoice Overview Top Banner -->
+    <div class="d-flex flex-wrap justify-content-between align-items-center p-3 mb-4 rounded-3 border" style="background:#f8fafc;">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="badge bg-primary text-white font-monospace px-3 py-2 fs-6 shadow-sm">
                 <?= htmlspecialchars($invoice['invoice_no']) ?>
             </span>
-            <h3 class="fw-bold text-dark mb-1"><?= htmlspecialchars($invoice['customer_name']) ?></h3>
-            <?php if (!empty($cust_lic)): ?>
-                <div class="mt-2">
-                    <span class="badge badge-light border text-dark font-weight-bold py-1 px-2 shadow-sm" style="font-size: 0.85rem;">
-                        <i class="fas fa-id-card text-success mr-1"></i> Drug Lic #: <span class="text-primary font-monospace"><?= htmlspecialchars($cust_lic) ?></span>
-                    </span>
-                </div>
+            <?php if (($invoice['customer_invoice_type'] ?? '') === 'warranty'): ?>
+                <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-2 fw-semibold">
+                    <i class="fa-solid fa-shield-halved me-1"></i> Warranty Invoice
+                </span>
+            <?php else: ?>
+                <span class="badge bg-dark-subtle text-dark border px-2 py-2 fw-semibold">
+                    <i class="fa-solid fa-file-invoice me-1"></i> Sale Invoice
+                </span>
             <?php endif; ?>
+            <span class="text-secondary small ms-2">
+                <i class="fa-regular fa-calendar me-1"></i> <?= date('d F Y', strtotime($invoice['invoice_date'])) ?>
+            </span>
         </div>
-        <div class="col-md-6 text-md-end">
-            <div class="mb-2"><?= $status_badge ?></div>
-            <div class="text-secondary small">Invoice Date: <strong><?= date('d F Y', strtotime($invoice['invoice_date'])) ?></strong></div>
-            <div class="text-secondary small">Payment Mode: <strong><?= htmlspecialchars($invoice['payment_method']) ?></strong></div>
+        <div class="d-flex align-items-center gap-2 mt-2 mt-md-0">
+            <?= $status_badge ?>
+            <span class="badge bg-white text-dark border px-3 py-2 fs-6 shadow-sm">
+                <i class="fa-solid fa-wallet text-secondary me-1"></i> <?= htmlspecialchars($invoice['payment_method']) ?>
+            </span>
         </div>
     </div>
 
-    <!-- Booker & Delivery Notes -->
-    <div class="row g-3 pb-3 border-bottom mb-4">
-        <div class="col-md-6">
-            <div class="section-header"><i class="fa-solid fa-user-tie"></i> Salesman &amp; Commission</div>
-            <div class="fw-bold text-dark fs-6"><?= htmlspecialchars($invoice['booker_name'] ?: 'Counter Direct') ?></div>
-            <?php 
-                $rate = floatval($invoice['salesman_commission_rate'] ?? 0);
-                $inv_returned = floatval($invoice['returned_amount'] ?? 0);
-                $inv_net = netSaleAmount($grand, $inv_returned);
-                if (!empty($invoice['booker_id']) && $rate > 0): 
-                    $sale_comm = round($inv_net * $rate / 100, 2);
-            ?>
-                <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
-                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1">
-                        <i class="fa-solid fa-percent me-1"></i> Rate: <?= number_format($rate, 2) ?>%
+    <!-- Customer & Salesman Information Cards -->
+    <div class="row g-3 mb-4">
+        <!-- Customer Details Card -->
+        <div class="col-lg-7 col-md-6">
+            <div class="card h-100 border shadow-none" style="background:#ffffff; border-radius:12px; border-color:#e2e8f0 !important;">
+                <div class="card-header bg-light border-bottom d-flex justify-content-between align-items-center py-2 px-3">
+                    <span class="fw-bold text-uppercase text-secondary small" style="letter-spacing:0.5px;">
+                        <i class="fa-solid fa-user-circle text-primary me-1"></i> Billed To / Customer Details
                     </span>
-                    <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
-                        <i class="fa-solid fa-coins me-1"></i> Commission on this Sale: Rs. <?= number_format($sale_comm, 2) ?>
-                    </span>
-                    <?php if ($inv_returned > 0): ?>
-                        <span class="badge bg-danger-subtle text-danger border border-danger-subtle px-2 py-1" title="Completed Good / Resalable returns of this invoice — commission inverts on the returned amount">
-                            <i class="fa-solid fa-rotate-left me-1"></i> Returned: -Rs. <?= number_format($inv_returned, 2) ?>
+                    <?php if (!empty($cust_lic)): ?>
+                        <span class="badge bg-success-subtle text-success border border-success-subtle py-1 px-2 font-monospace" style="font-size:0.8rem;">
+                            <i class="fa-solid fa-id-card me-1"></i> Drug Lic #: <?= htmlspecialchars($cust_lic) ?>
                         </span>
                     <?php endif; ?>
-                    <a href="../employees/ledger.php?emp_id=<?= (int)$invoice['booker_id'] ?>&month=<?= date('Y-m', strtotime($invoice['invoice_date'])) ?>" class="btn btn-xs btn-outline-secondary py-0" style="font-size:0.75rem;" target="_blank">
-                        <i class="fa-solid fa-book-open me-1"></i> View Month Ledger
-                    </a>
                 </div>
-            <?php else: ?>
-                <small class="text-muted">Assigned Sales Officer</small>
-            <?php endif; ?>
+                <div class="card-body p-3">
+                    <div class="row g-2 align-items-center">
+                        <div class="col-sm-7">
+                            <?php 
+                                $v_cust_name = !empty($invoice['customer_person_name']) ? $invoice['customer_person_name'] : $invoice['customer_name'];
+                                $v_shop_name = trim($invoice['shop_name'] ?? '');
+                            ?>
+                            <div class="fw-bold text-dark fs-5 mb-1"><?= htmlspecialchars($v_cust_name) ?></div>
+                            <?php if (!empty($v_shop_name) && strcasecmp($v_shop_name, $v_cust_name) !== 0): ?>
+                                <div class="text-primary fw-semibold fs-6 mb-1">
+                                    <i class="fa-solid fa-clinic-medical me-1 text-primary"></i><?= htmlspecialchars($v_shop_name) ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                        <div class="col-sm-5 border-start ps-3">
+                            <?php 
+                                $v_addr_parts = [];
+                                if (!empty($invoice['customer_address'])) $v_addr_parts[] = trim($invoice['customer_address']);
+                                $v_area = trim(($invoice['customer_area'] ?? '') ?: ($invoice['route_name'] ?? ''));
+                                if (!empty($v_area) && (empty($v_addr_parts) || stripos($v_addr_parts[0], $v_area) === false)) {
+                                    $v_addr_parts[] = $v_area;
+                                }
+                                $v_full_addr = implode(', ', $v_addr_parts);
+                                if (!empty($v_full_addr)): 
+                            ?>
+                                <div class="text-secondary small mb-2">
+                                    <i class="fa-solid fa-location-dot text-danger me-1"></i><strong><?= htmlspecialchars($v_full_addr) ?></strong>
+                                </div>
+                            <?php endif; ?>
+                            <?php if (!empty($invoice['customer_phone'])): ?>
+                                <div class="text-dark small fw-bold">
+                                    <i class="fa-solid fa-phone text-success me-1"></i><span class="font-monospace"><?= htmlspecialchars($invoice['customer_phone']) ?></span>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="col-md-6">
-            <div class="section-header"><i class="fa-regular fa-comment-dots"></i> Remarks / Instructions</div>
-            <div class="text-dark small"><?= nl2br(htmlspecialchars($invoice['notes'] ?: 'No special instructions.')) ?></div>
+
+        <!-- Salesman & Dispatch Card -->
+        <div class="col-lg-5 col-md-6">
+            <div class="card h-100 border shadow-none" style="background:#ffffff; border-radius:12px; border-color:#e2e8f0 !important;">
+                <div class="card-header bg-light border-bottom py-2 px-3">
+                    <span class="fw-bold text-uppercase text-secondary small" style="letter-spacing:0.5px;">
+                        <i class="fa-solid fa-user-tie text-primary me-1"></i> Salesman &amp; Dispatch
+                    </span>
+                </div>
+                <div class="card-body p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="text-secondary small">Sales Officer:</span>
+                        <span class="fw-bold text-dark"><?= htmlspecialchars($invoice['booker_name'] ?: 'Counter Direct') ?></span>
+                    </div>
+                    <?php 
+                        $rate = floatval($invoice['salesman_commission_rate'] ?? 0);
+                        $inv_returned = floatval($invoice['returned_amount'] ?? 0);
+                        $inv_net = netSaleAmount($grand, $inv_returned);
+                        if (!empty($invoice['booker_id']) && $rate > 0): 
+                            $sale_comm = round($inv_net * $rate / 100, 2);
+                    ?>
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-1 mb-2">
+                        <span class="text-secondary small">Commission:</span>
+                        <div class="d-flex align-items-center gap-1">
+                            <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1">Rate: <?= number_format($rate, 2) ?>%</span>
+                            <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">Rs. <?= number_format($sale_comm, 2) ?></span>
+                            <a href="../employees/ledger.php?emp_id=<?= (int)$invoice['booker_id'] ?>&month=<?= date('Y-m', strtotime($invoice['invoice_date'])) ?>" class="btn btn-xs btn-outline-secondary py-0 px-1" style="font-size:0.75rem;" target="_blank" title="View Month Ledger">
+                                <i class="fa-solid fa-book-open"></i>
+                            </a>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+                    <?php if (!empty($invoice['notes'])): ?>
+                    <div class="border-top pt-2 mt-2">
+                        <span class="text-secondary small d-block"><strong>Instructions / Notes:</strong></span>
+                        <span class="text-dark small fst-italic"><?= nl2br(htmlspecialchars($invoice['notes'])) ?></span>
+                    </div>
+                    <?php endif; ?>
+                </div>
+            </div>
         </div>
     </div>
 

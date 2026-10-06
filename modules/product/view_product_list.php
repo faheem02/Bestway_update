@@ -7,6 +7,8 @@ $page_title = "Products";
 $compact_page_heading = true;
 require_once __DIR__ . '/../../includes/header.php';
 
+requireRole(['admin']);
+
 // Action column (View / Edit / Delete) is Admin only
 $can_manage_products = isAdmin();
 

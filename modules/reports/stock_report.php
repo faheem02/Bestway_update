@@ -7,6 +7,8 @@ require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/header.php';
 
+requireRole(['admin']);
+
 if (!$pdo) {
     die("<div class='p-4 text-danger'>Database connection unavailable.</div>");
 }

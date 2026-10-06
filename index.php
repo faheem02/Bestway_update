@@ -55,7 +55,8 @@ if (!empty($pdo) && $db_connected) {
             $bk_sql = $bkid ? " OR booker_id = :bkid" : "";
             $stmt = $pdo->prepare("SELECT COALESCE(SUM(grand_total), 0) as total, 
                                           COALESCE(SUM(paid_amount), 0) as cash_total,
-                                          COALESCE(SUM(CASE WHEN paid_amount < grand_total THEN grand_total - paid_amount ELSE 0 END), 0) as credit_total
+                                          COALESCE(SUM(CASE WHEN paid_amount < grand_total THEN grand_total - paid_amount ELSE 0 END), 0) as credit_total,
+                                          COUNT(*) as invoice_count
                                    FROM sales_invoices 
                                    WHERE DATE(invoice_date) = :today AND (created_by = :uid {$bk_sql})");
             $params = ['today' => $today, 'uid' => $uid];
@@ -66,6 +67,16 @@ if (!empty($pdo) && $db_connected) {
             $today_sales = (float)$res['total'];
             $today_cash_sales = (float)$res['cash_total'];
             $today_credit_sales = (float)$res['credit_total'];
+            $today_invoices_count = (int)($res['invoice_count'] ?? 0);
+        }
+    } catch (Exception $e) {}
+
+    // Customers count
+    $total_customers_count = 0;
+    try {
+        $stmt_cust = $pdo->query("SELECT COUNT(*) as total FROM customers WHERE status = 1");
+        if ($r = $stmt_cust->fetch()) {
+            $total_customers_count = (int)$r['total'];
         }
     } catch (Exception $e) {}
 
@@ -342,18 +353,18 @@ $chart_recovery_values = array_values($recovery_chart_data);
           </div>
         </div>
         <?php else: ?>
-        <!-- Salesman View: Total Products & Low Stock Items -->
+        <!-- Salesman View: Today Invoices & Registered Customers -->
         <div class="col-xl-4 col-md-6 mb-3">
           <div class="card border-left-info stat-card h-100">
             <div class="card-body py-3">
               <div class="d-flex align-items-center justify-content-between">
                 <div>
-                  <div class="stat-label">Active Products</div>
-                  <div class="stat-value text-info"><?= number_format($total_products_count) ?></div>
-                  <div class="stat-sub">Available in catalog</div>
+                  <div class="stat-label">Today Invoices</div>
+                  <div class="stat-value text-info"><?= number_format($today_invoices_count ?? 0) ?></div>
+                  <div class="stat-sub">Orders booked today</div>
                 </div>
                 <div class="icon-circle icon-info">
-                  <i class="fas fa-box-open"></i>
+                  <i class="fas fa-receipt"></i>
                 </div>
               </div>
             </div>
@@ -361,16 +372,16 @@ $chart_recovery_values = array_values($recovery_chart_data);
         </div>
 
         <div class="col-xl-4 col-md-6 mb-3">
-          <div class="card border-left-warning stat-card h-100">
+          <div class="card border-left-success stat-card h-100">
             <div class="card-body py-3">
               <div class="d-flex align-items-center justify-content-between">
                 <div>
-                  <div class="stat-label">Low Stock Alerts</div>
-                  <div class="stat-value text-warning"><?= (int)$low_stock_count ?></div>
-                  <div class="stat-sub">Items below reorder level</div>
+                  <div class="stat-label">Registered Customers</div>
+                  <div class="stat-value text-success"><?= number_format($total_customers_count ?? 0) ?></div>
+                  <div class="stat-sub">Active market buyers</div>
                 </div>
-                <div class="icon-circle icon-amber">
-                  <i class="fas fa-exclamation-triangle"></i>
+                <div class="icon-circle icon-success">
+                  <i class="fas fa-users"></i>
                 </div>
               </div>
             </div>
@@ -426,19 +437,25 @@ $chart_recovery_values = array_values($recovery_chart_data);
                   </a>
                 </div>
                 <?php else: ?>
-                <div class="col-6 col-sm-4 col-md-2 mb-2">
-                  <a href="<?= BASE_URL ?>modules/product/view_product_list.php" class="chip-chip d-flex flex-column text-center">
-                    <i class="fas fa-boxes mb-1"></i>
-                    <span>Product List</span>
+                <div class="col-6 col-sm-4 col-md-3 mb-2">
+                  <a href="<?= BASE_URL ?>modules/sale/new_sale.php" class="chip-chip d-flex flex-column text-center">
+                    <i class="fas fa-plus-circle mb-1"></i>
+                    <span>Create Order</span>
                   </a>
                 </div>
-                <div class="col-6 col-sm-4 col-md-2 mb-2">
+                <div class="col-6 col-sm-4 col-md-3 mb-2">
+                  <a href="<?= BASE_URL ?>modules/sale/sales.php" class="chip-chip d-flex flex-column text-center">
+                    <i class="fas fa-receipt mb-1"></i>
+                    <span>Sales History</span>
+                  </a>
+                </div>
+                <div class="col-6 col-sm-4 col-md-3 mb-2">
                   <a href="<?= BASE_URL ?>modules/customer/customers.php" class="chip-chip d-flex flex-column text-center">
                     <i class="fas fa-users mb-1"></i>
                     <span>Customers</span>
                   </a>
                 </div>
-                <div class="col-6 col-sm-4 col-md-2 mb-2">
+                <div class="col-6 col-sm-4 col-md-3 mb-2">
                   <a href="<?= BASE_URL ?>modules/customer/customers.php?add=1" class="chip-chip d-flex flex-column text-center">
                     <i class="fas fa-user-plus mb-1"></i>
                     <span>Add Customer</span>
@@ -526,20 +543,15 @@ $chart_recovery_values = array_values($recovery_chart_data);
 
       <!-- Tables Row -->
       <div class="row">
+        <?php if (isAdmin()): ?>
         <!-- Low Stock Alert -->
         <div class="col-xl-6 mb-4">
           <div class="card h-100">
             <div class="card-header d-flex align-items-center justify-content-between">
               <h6 class="mb-0"><i class="fas fa-exclamation-triangle text-warning mr-2"></i>Low Stock Alert</h6>
-              <?php if (isAdmin()): ?>
               <a href="<?= BASE_URL ?>modules/purchase/add_purchase.php" class="btn btn-warning btn-sm">
                 <i class="fas fa-cart-plus mr-1"></i> Order Stock
               </a>
-              <?php else: ?>
-              <a href="<?= BASE_URL ?>modules/product/view_product_list.php" class="btn btn-outline-warning btn-sm">
-                <i class="fas fa-boxes mr-1"></i> All Products
-              </a>
-              <?php endif; ?>
             </div>
             <div class="card-body p-0">
               <div class="table-responsive">
@@ -582,9 +594,10 @@ $chart_recovery_values = array_values($recovery_chart_data);
             </div>
           </div>
         </div>
+        <?php endif; ?>
 
         <!-- Recent Sales -->
-        <div class="col-xl-6 mb-4">
+        <div class="<?= isAdmin() ? 'col-xl-6' : 'col-xl-12' ?> mb-4">
           <div class="card h-100">
             <div class="card-header d-flex align-items-center justify-content-between">
               <h6 class="mb-0"><i class="fas fa-receipt text-primary mr-2"></i>Recent Invoices</h6>

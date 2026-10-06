@@ -5,6 +5,8 @@
 $page_title = "Units of Measurement (UOM)";
 require_once __DIR__ . '/../../includes/header.php';
 
+requireRole(['admin']);
+
 $message = "";
 $msg_type = "";
 $edit_data = null;

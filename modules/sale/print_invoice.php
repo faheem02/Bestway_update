@@ -69,39 +69,41 @@ if (!$invoice) die('Invoice not found.');
 // Har customer ko add/edit karte waqt "Invoice Type" (Sale / Warranty) allocate hoti hai.
 // Agar URL me type nahi diya gaya to us customer ki saved preference ke hisab se sahi invoice khud-b-khud print hogi.
 // &manual=1 dene se selection screen dobara dikhai ja sakti hai (override ke liye).
+// ── Auto-detect invoice type and fetch full customer details ──────────────────
+$customer_row = null;
 $cust_license = '';
 $cust_id = intval($invoice['customer_id'] ?? 0);
 $detected_type = null;
 
 if ($cust_id > 0) {
     try {
-        $ct = $pdo->prepare("SELECT invoice_type, license_number FROM customers WHERE id = ? LIMIT 1");
+        $ct = $pdo->prepare("SELECT * FROM customers WHERE id = ? LIMIT 1");
         $ct->execute([$cust_id]);
-        $crow = $ct->fetch();
-        if ($crow) {
-            if (!empty($crow['invoice_type'])) {
-                $detected_type = strtolower(trim($crow['invoice_type']));
+        $customer_row = $ct->fetch(PDO::FETCH_ASSOC);
+        if ($customer_row) {
+            if (!empty($customer_row['invoice_type'])) {
+                $detected_type = strtolower(trim($customer_row['invoice_type']));
             }
-            if (!empty($crow['license_number'])) {
-                $cust_license = trim($crow['license_number']);
+            if (!empty($customer_row['license_number'])) {
+                $cust_license = trim($customer_row['license_number']);
             }
         }
     } catch (Exception $e) {}
 }
 
-// Fallback: match by customer_name if customer_id was not linked or license was empty
-if ((!$detected_type || empty($cust_license)) && !empty($invoice['customer_name'])) {
+// Fallback: match by customer_name if customer_id was not linked or not found
+if (!$customer_row && !empty($invoice['customer_name'])) {
     try {
         $cname = trim($invoice['customer_name']);
-        $ct2 = $pdo->prepare("SELECT invoice_type, license_number FROM customers WHERE name = ? OR shop_name = ? LIMIT 1");
+        $ct2 = $pdo->prepare("SELECT * FROM customers WHERE name = ? OR shop_name = ? LIMIT 1");
         $ct2->execute([$cname, $cname]);
-        $crow2 = $ct2->fetch();
-        if ($crow2) {
-            if (!$detected_type && !empty($crow2['invoice_type'])) {
-                $detected_type = strtolower(trim($crow2['invoice_type']));
+        $customer_row = $ct2->fetch(PDO::FETCH_ASSOC);
+        if ($customer_row) {
+            if (!$detected_type && !empty($customer_row['invoice_type'])) {
+                $detected_type = strtolower(trim($customer_row['invoice_type']));
             }
-            if (empty($cust_license) && !empty($crow2['license_number'])) {
-                $cust_license = trim($crow2['license_number']);
+            if (empty($cust_license) && !empty($customer_row['license_number'])) {
+                $cust_license = trim($customer_row['license_number']);
             }
         }
     } catch (Exception $e) {}
@@ -138,9 +140,41 @@ try {
 
 $inv_no      = htmlspecialchars($invoice['invoice_no'] ?? '#'.$id);
 $inv_date    = date('d-M-Y', strtotime($invoice['invoice_date'] ?? date('Y-m-d')));
-$cust_name   = htmlspecialchars($invoice['customer_name'] ?? 'Walk-in Customer');
-$cust_phone  = htmlspecialchars($invoice['customer_phone'] ?? '');
-$route_name  = htmlspecialchars($invoice['route_name'] ?? '');
+
+// Customer details: Full Name, Pharmacy/Shop Name, Phone, Address/Area
+$cust_person = !empty($customer_row['name']) ? trim($customer_row['name']) : trim($invoice['customer_name'] ?? 'Walk-in Customer');
+$cust_shop   = !empty($customer_row['shop_name']) ? trim($customer_row['shop_name']) : '';
+
+// If shop name is not set in customer_row but invoice customer_name differs from person name:
+if (empty($cust_shop) && !empty($invoice['customer_name']) && strcasecmp($invoice['customer_name'], $cust_person) !== 0) {
+    $cust_shop = trim($invoice['customer_name']);
+}
+
+$cust_name           = htmlspecialchars($cust_person);
+$cust_shop_name      = htmlspecialchars($cust_shop);
+$cust_phone          = htmlspecialchars(trim($customer_row['phone'] ?? $invoice['customer_phone'] ?? ''));
+
+// Address & Area
+$addr_parts = [];
+if (!empty($customer_row['address'])) {
+    $addr_parts[] = trim($customer_row['address']);
+}
+$area_val = trim($customer_row['area'] ?? $invoice['route_name'] ?? '');
+if (!empty($area_val)) {
+    $already_in = false;
+    foreach ($addr_parts as $p) {
+        if (stripos($p, $area_val) !== false) {
+            $already_in = true;
+            break;
+        }
+    }
+    if (!$already_in) {
+        $addr_parts[] = $area_val;
+    }
+}
+$cust_address_display = htmlspecialchars(implode(', ', $addr_parts));
+
+$route_name  = htmlspecialchars($invoice['route_name'] ?? $customer_row['area'] ?? '');
 $booker_name = htmlspecialchars($invoice['booker_name'] ?? '');
 $notes       = htmlspecialchars($invoice['notes'] ?? '');
 $grand_total = (float)($invoice['grand_total'] ?? 0);
@@ -169,7 +203,7 @@ $sign_src = file_exists($sign_file) ? 'data:image/png;base64,' . base64_encode(f
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Invoice <?= $inv_no ?> — Bestway Distribution</title>
+<title>Invoice <?= $inv_no ?><?= $type === 'warranty' ? ' — Bestway Distribution' : '' ?></title>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/4.6.2/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -192,8 +226,8 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
 .inv-meta-small { font-size:11px; color:#64748b; line-height:1.7; }
 
 /* ── Info Boxes ──────────────────────────────────────────────── */
-.info-box { background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:10px 14px; font-size:12px; }
-.info-box .label { font-size:10px; font-weight:700; text-transform:uppercase; color:#94a3b8; letter-spacing:.5px; }
+.info-box { background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:12px 16px; font-size:13px; }
+.info-box .label { font-size:11px; font-weight:800; text-transform:uppercase; color:#64748b; letter-spacing:.6px; }
 
 /* ── Table ───────────────────────────────────────────────────── */
 .inv-table { width:100%; border-collapse:collapse; margin:14px 0; }
@@ -339,17 +373,11 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
     </div>
   </div>
   <?php else: ?>
-  <!-- SALE: Regular Sale Invoice with logo -->
+  <!-- SALE: Regular Sale Invoice without logo or company name -->
   <div class="inv-header d-flex justify-content-between align-items-center">
     <div class="d-flex align-items-center">
-      <img src="<?= $logo_src ?>" alt="Bestway Distribution" class="inv-logo mr-3">
-      <div>
-        <div class="company-name" style="font-size:18px; margin-bottom:2px;"><?= htmlspecialchars($company['name']) ?></div>
-        <div class="d-flex align-items-center">
-          <span class="inv-type-badge badge-sale mb-0 mr-2">Sale Invoice</span>
-          <span class="inv-no"><?= $inv_no ?></span>
-        </div>
-      </div>
+      <span class="inv-type-badge badge-sale mb-0 mr-2">Sale Invoice</span>
+      <span class="inv-no"><?= $inv_no ?></span>
     </div>
     <div class="inv-title-box">
       <div class="inv-meta-small">
@@ -361,29 +389,69 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
   </div>
   <?php endif; ?>
 
-  <!-- ── CUSTOMER INFO ─────────────────────────────────────────── -->
+  <!-- ── CUSTOMER INFO & SUMMARY ───────────────────────────────── -->
   <div class="row mb-3">
-    <div class="col-7">
+    <!-- Left: Billed To (col-8) -->
+    <div class="col-8">
       <div class="info-box h-100">
-        <div class="label">Billed To</div>
-        <div class="font-weight-bold mt-1" style="font-size:14px;"><?= $cust_name ?></div>
-        <?php if ($cust_phone): ?><div class="text-muted small"><i class="fas fa-phone mr-1"></i><?= $cust_phone ?></div><?php endif; ?>
-        <?php if ($route_name): ?><div class="text-muted small"><i class="fas fa-map-marker-alt mr-1"></i>Area: <?= $route_name ?></div><?php endif; ?>
-        <?php if (!empty($cust_license)): ?>
-          <div class="small font-weight-bold mt-1 text-dark"><i class="fas fa-id-card text-success mr-1"></i>Customer Drug Lic #: <span class="text-primary font-weight-bold"><?= htmlspecialchars($cust_license) ?></span></div>
-        <?php elseif ($type === 'warranty'): ?>
-          <div class="small font-weight-bold mt-1 text-muted"><i class="fas fa-id-card mr-1"></i>Customer Drug Lic #: <span class="fst-italic">not on record</span></div>
-        <?php endif; ?>
+        <div class="d-flex justify-content-between align-items-center border-bottom pb-1 mb-2">
+          <span class="label mb-0"><i class="fas fa-user-circle mr-1"></i> Billed To</span>
+          <?php if (!empty($cust_license)): ?>
+            <span class="badge badge-light border text-dark font-weight-bold" style="font-size:11.5px; padding:3px 8px;">
+              <i class="fas fa-id-card text-success mr-1"></i> Customer Drug Lic #: <strong class="text-primary font-monospace"><?= htmlspecialchars($cust_license) ?></strong>
+            </span>
+          <?php elseif ($type === 'warranty'): ?>
+            <span class="badge badge-light border text-muted" style="font-size:11px; padding:3px 8px;">
+              <i class="fas fa-id-card mr-1"></i> Customer Drug Lic #: <span class="fst-italic text-muted">not on record</span>
+            </span>
+          <?php endif; ?>
+        </div>
+        <div class="row align-items-center">
+          <div class="col-7">
+            <div style="font-size:16px; font-weight:800; color:#0f172a; line-height:1.25; margin-bottom:3px;">
+              <?= $cust_name ?>
+            </div>
+            <?php if (!empty($cust_shop_name) && strcasecmp($cust_shop_name, $cust_name) !== 0): ?>
+              <div style="font-size:14.5px; font-weight:700; color:#0284c7; line-height:1.3;">
+                <i class="fas fa-clinic-medical mr-1 text-primary"></i><?= $cust_shop_name ?>
+              </div>
+            <?php endif; ?>
+          </div>
+          <div class="col-5 border-left pl-3">
+            <?php if (!empty($cust_address_display)): ?>
+              <div style="font-size:13px; color:#334155; font-weight:600; line-height:1.35; margin-bottom:4px;">
+                <i class="fas fa-map-marker-alt text-danger mr-1"></i><?= $cust_address_display ?>
+              </div>
+            <?php endif; ?>
+            <?php if (!empty($cust_phone)): ?>
+              <div style="font-size:13.5px; font-weight:700; color:#0f172a; line-height:1.3;">
+                <i class="fas fa-phone-alt text-success mr-1"></i><span class="font-monospace"><?= $cust_phone ?></span>
+              </div>
+            <?php endif; ?>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="col-5">
-      <div class="info-box h-100 text-right">
-        <div class="label">Invoice Summary</div>
-        <div class="mt-1 small">
-          Items: <strong><?= count($items) ?></strong><br>
-          Total Qty: <strong><?= number_format($total_qty) ?></strong><br>
-          <?php if ($notes): ?><span class="text-muted">Note: <?= $notes ?></span><?php endif; ?>
+
+    <!-- Right: Invoice Summary (col-4) -->
+    <div class="col-4">
+      <div class="info-box h-100">
+        <div class="label border-bottom pb-1 mb-2">
+          <i class="fas fa-file-invoice mr-1"></i> Invoice Summary
         </div>
+        <div class="d-flex justify-content-between align-items-center mb-1 pb-1" style="font-size:13.5px;">
+          <span class="text-muted font-weight-500">Total Items:</span>
+          <span class="font-weight-bold text-dark badge badge-light border px-2 py-1" style="font-size:13px;"><?= count($items) ?></span>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-1 pb-1" style="font-size:13.5px;">
+          <span class="text-muted font-weight-500">Total Qty:</span>
+          <span class="font-weight-bold text-dark font-monospace" style="font-size:14px;"><?= number_format($total_qty) ?> pcs</span>
+        </div>
+        <?php if ($notes): ?>
+          <div class="mt-2 pt-1 border-top" style="font-size:11.5px; color:#64748b;">
+            <strong>Note:</strong> <?= $notes ?>
+          </div>
+        <?php endif; ?>
       </div>
     </div>
   </div>

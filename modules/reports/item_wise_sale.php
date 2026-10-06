@@ -113,43 +113,14 @@ $stmt_list->execute();
 $sales_items = $stmt_list->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt_list->close();
 
-// ---- Fetch Sales Returns matching the filter criteria ----
+// ---- Fetch Sales Returns matching the same invoice filter criteria ----
 $ret_where = ["sr.status = 'Completed'"];
-$ret_params = [];
-$ret_types = "";
-if (!empty($start_date) && !empty($end_date)) {
-    $ret_where[] = "((sr.return_date >= ? AND sr.return_date <= ?) OR (si.invoice_date >= ? AND si.invoice_date <= ?))";
-    $ret_params[] = $start_date;
-    $ret_params[] = $end_date;
-    $ret_params[] = $start_date;
-    $ret_params[] = $end_date;
-    $ret_types .= "ssss";
-} elseif (!empty($start_date)) {
-    $ret_where[] = "(sr.return_date >= ? OR si.invoice_date >= ?)";
-    $ret_params[] = $start_date;
-    $ret_params[] = $start_date;
-    $ret_types .= "ss";
-} elseif (!empty($end_date)) {
-    $ret_where[] = "(sr.return_date <= ? OR si.invoice_date <= ?)";
-    $ret_params[] = $end_date;
-    $ret_params[] = $end_date;
-    $ret_types .= "ss";
-}
+$ret_params = $params;
+$ret_types  = $types;
 
-if ($area !== '') {
-    $ret_where[] = "(LOWER(si.route_name) = LOWER(?) OR LOWER(c.area) = LOWER(?))";
-    $ret_params[] = $area;
-    $ret_params[] = $area;
-    $ret_types .= "ss";
-}
-
-if ($salesman_id > 0) {
-    $ret_where[] = "si.booker_id = ?";
-    $ret_params[] = $salesman_id;
-    $ret_types .= "i";
-}
-
+$ret_where[] = $where_sql;
 $ret_where_sql = implode(" AND ", $ret_where);
+
 $ret_sql = "
     SELECT 
         sri.product_id,
@@ -160,10 +131,10 @@ $ret_sql = "
         COALESCE(SUM(sri.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)), 0) AS returned_cost
     FROM sale_returns sr
     JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
-    LEFT JOIN sales_invoices si ON (si.id = sr.sale_id OR si.id = sr.invoice_id)
+    JOIN sales_invoices si ON (si.id = sr.sale_id OR (sr.sale_id IS NULL AND si.id = sr.invoice_id))
     LEFT JOIN products p ON p.id = sri.product_id
-    LEFT JOIN product_batches pb ON pb.id = sri.batch_no
-    LEFT JOIN customers c ON c.id = COALESCE(sr.customer_id, si.customer_id)
+    LEFT JOIN product_batches pb ON (pb.batch_no = sri.batch_no AND pb.product_id = sri.product_id)
+    LEFT JOIN customers c ON c.id = si.customer_id
     WHERE {$ret_where_sql}
     GROUP BY sri.product_id, p.product_code, p.name
 ";
@@ -195,23 +166,21 @@ foreach ($returns_raw as $rr) {
     $total_returned_cost   += (float)$rr['returned_cost'];
 }
 
-// Adjust Summary Metrics with Returns
+// Adjust Summary Metrics with Returns (guaranteed non-negative)
 $summary['total_returned_qty']    = $total_returned_qty;
 $summary['total_returned_amount'] = $total_returned_amount;
 $summary['total_returned_cost']   = $total_returned_cost;
 
-$summary['net_sold_qty']          = $summary['total_qty'] - $total_returned_qty;
-$summary['net_sales_amount']      = $summary['total_net'] - $total_returned_amount;
-$summary['net_cost_amount']       = $summary['total_cost'] - $total_returned_cost;
+$summary['net_sold_qty']          = max(0.0, $summary['total_qty'] - $total_returned_qty);
+$summary['net_sales_amount']      = max(0.0, $summary['total_net'] - $total_returned_amount);
+$summary['net_cost_amount']       = max(0.0, $summary['total_cost'] - $total_returned_cost);
 $summary['net_margin_amount']     = $summary['net_sales_amount'] - $summary['net_cost_amount'];
 
 // Merge Sales & Returns per Product
 $final_items = [];
-$seen_pids = [];
 
 foreach ($sales_items as $si) {
     $pid = (int)$si['product_id'];
-    $seen_pids[$pid] = true;
 
     $ret = $returns_by_product[$pid] ?? ['qty' => 0, 'amount' => 0, 'cost' => 0];
     $sold_q  = (float)$si['total_qty'];
@@ -244,29 +213,6 @@ foreach ($sales_items as $si) {
         'net_amount'      => $net_amt,
         'margin_amount'   => $margin,
     ];
-}
-
-// Any products that had returns in this period but 0 sales
-foreach ($returns_by_product as $r_pid => $r_data) {
-    if (!isset($seen_pids[$r_pid]) && $r_data['qty'] > 0) {
-        $final_items[] = [
-            'product_id'      => $r_pid,
-            'item_name'       => $r_data['product_name'],
-            'product_code'    => $r_data['product_code'],
-            'invoice_count'   => 0,
-            'sold_qty'        => 0,
-            'returned_qty'    => (float)$r_data['qty'],
-            'net_qty'         => -(float)$r_data['qty'],
-            'bonus_qty'       => 0,
-            'avg_rate'        => ($r_data['qty'] > 0 ? round($r_data['amount'] / $r_data['qty'], 2) : 0),
-            'avg_cost'        => ($r_data['qty'] > 0 ? round($r_data['cost'] / $r_data['qty'], 2) : 0),
-            'gross_amount'    => 0,
-            'discount_amount' => 0,
-            'returned_amount' => (float)$r_data['amount'],
-            'net_amount'      => -(float)$r_data['amount'],
-            'margin_amount'   => -((float)$r_data['amount'] - (float)$r_data['cost']),
-        ];
-    }
 }
 
 // ---- Filter dropdowns ----
@@ -342,7 +288,7 @@ $report_orientation = "landscape";
                     <div>
                         <span class="text-muted small fw-bold text-uppercase">Net Sold Qty</span>
                         <h4 class="fw-bold mb-0 text-dark"><?= number_format($summary['net_sold_qty']) ?> <small class="text-muted font-weight-normal">(+<?= number_format($summary['total_bonus']) ?>)</small></h4>
-                        <span class="small text-muted">Sold: <?= number_format($summary['total_qty']) ?> | <span class="text-danger fw-semibold">Ret: -<?= number_format($summary['total_returned_qty']) ?></span></span>
+                        <span class="small text-muted">Sold: <?= number_format($summary['total_qty']) ?> | <span class="text-danger fw-semibold">Ret: <?= ($summary['total_returned_qty'] > 0 ? '-' : '') . number_format($summary['total_returned_qty']) ?></span></span>
                     </div>
                     <div class="p-3 bg-info-subtle text-info rounded-circle"><i class="fa-solid fa-pills fs-4"></i></div>
                 </div>
@@ -366,7 +312,7 @@ $report_orientation = "landscape";
                     <div>
                         <span class="text-muted small fw-bold text-uppercase">Net Sales</span>
                         <h4 class="fw-bold mb-0 text-dark">Rs. <?= number_format($summary['net_sales_amount'], 2) ?></h4>
-                        <span class="small text-danger fw-semibold">Returns: -Rs. <?= number_format($summary['total_returned_amount'], 2) ?></span>
+                        <span class="small text-danger fw-semibold">Returns: <?= ($summary['total_returned_amount'] > 0 ? '-Rs. ' : 'Rs. ') . number_format($summary['total_returned_amount'], 2) ?></span>
                     </div>
                     <div class="p-3 bg-warning-subtle text-warning rounded-circle"><i class="fa-solid fa-money-bill-wave fs-4"></i></div>
                 </div>
