@@ -79,11 +79,22 @@ if ($db_connected && $pdo) {
                 c.name as company_name,
                 cat.name as category_name,
                 u.name as unit_name,
-                u.short_name as unit_short
+                u.short_name as unit_short,
+                pb.batch_no,
+                pb.expiry_date
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
             LEFT JOIN units u ON p.unit_id = u.id
+            LEFT JOIN (
+                SELECT pb1.product_id, pb1.batch_no, pb1.expiry_date
+                FROM product_batches pb1
+                INNER JOIN (
+                    SELECT product_id, MAX(id) as max_id
+                    FROM product_batches
+                    GROUP BY product_id
+                ) pb2 ON pb1.id = pb2.max_id
+            ) pb ON pb.product_id = p.id
             WHERE $where_sql
             ORDER BY p.name ASC
         ");
@@ -308,6 +319,11 @@ foreach ($products as $pr) {
                                 <strong><?= htmlspecialchars($pr['name']) ?></strong>
                                 <?php if (!empty($pr['generic_name'])): ?>
                                     <div class="text-muted" style="font-size: 10px;"><?= htmlspecialchars($pr['generic_name']) ?></div>
+                                <?php endif; ?>
+                                <?php if (!empty($pr['batch_no'])): ?>
+                                    <div class="text-secondary font-monospace" style="font-size: 10px;">
+                                        Batch: <strong><?= htmlspecialchars($pr['batch_no']) ?></strong><?= !empty($pr['expiry_date']) ? ' | Exp: ' . date('d-M-Y', strtotime($pr['expiry_date'])) : '' ?>
+                                    </div>
                                 <?php endif; ?>
                             </td>
                             <td><?= htmlspecialchars($pr['company_name'] ?? 'N/A') ?></td>

@@ -104,18 +104,29 @@ if ($db_connected && $pdo) {
         $low_stock_count      = intval($kpi['low_cnt'] ?? 0);
         $out_of_stock_count   = intval($kpi['out_cnt'] ?? 0);
 
-        // Fetch Filtered Products
+        // Fetch Filtered Products with latest Batch & Expiry
         $stmt = $pdo->prepare("
             SELECT 
                 p.*,
                 c.name as company_name,
                 cat.name as category_name,
                 u.name as unit_name,
-                u.short_name as unit_short
+                u.short_name as unit_short,
+                pb.batch_no,
+                pb.expiry_date
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
             LEFT JOIN units u ON p.unit_id = u.id
+            LEFT JOIN (
+                SELECT pb1.product_id, pb1.batch_no, pb1.expiry_date
+                FROM product_batches pb1
+                INNER JOIN (
+                    SELECT product_id, MAX(id) as max_id
+                    FROM product_batches
+                    GROUP BY product_id
+                ) pb2 ON pb1.id = pb2.max_id
+            ) pb ON pb.product_id = p.id
             WHERE $where_sql
             ORDER BY p.id DESC
             LIMIT 300
@@ -476,6 +487,7 @@ if ($db_connected && $pdo) {
                     <th style="width: 110px;">Product Code</th>
                     <th>Medicine / Product Name</th>
                     <th>Company / Category</th>
+                    <th class="text-center" style="width: 125px;">Batch / Expiry</th>
                     <th class="text-end">TP / Sale Rate</th>
                     <th class="text-center">Stock on Hand</th>
                     <?php if ($can_manage_products): ?>
@@ -486,7 +498,7 @@ if ($db_connected && $pdo) {
             <tbody>
                 <?php if (empty($products)): ?>
                     <tr>
-                        <td colspan="<?= $can_manage_products ? 6 : 5 ?>" class="text-center py-5 text-muted">
+                        <td colspan="<?= $can_manage_products ? 7 : 6 ?>" class="text-center py-5 text-muted">
                             <i class="fa-solid fa-box-open fs-1 text-secondary opacity-50 mb-3 d-block"></i>
                             <h6 class="fw-bold text-dark">No products found</h6>
                             <p class="small text-muted mb-3">No products match your current filters or no products have been added yet.</p>
@@ -529,6 +541,21 @@ if ($db_connected && $pdo) {
                                 </span>
                             </td>
 
+                            <td class="text-center">
+                                <?php if (!empty($p['batch_no'])): ?>
+                                    <span class="badge bg-light text-primary border font-monospace px-2 py-1">
+                                        <?= htmlspecialchars($p['batch_no']) ?>
+                                    </span>
+                                    <?php if (!empty($p['expiry_date'])): ?>
+                                        <div class="text-muted mt-1" style="font-size: 0.72rem;">
+                                            Exp: <?= date('d-M-Y', strtotime($p['expiry_date'])) ?>
+                                        </div>
+                                    <?php endif; ?>
+                                <?php else: ?>
+                                    <span class="text-muted small">—</span>
+                                <?php endif; ?>
+                            </td>
+
                             <td class="text-end">
                                 <div class="fw-bold text-primary font-monospace">Rs. <?= number_format($tp, 2) ?></div>
                                 <div class="small text-muted font-monospace">Sale: Rs. <?= number_format($sale, 2) ?></div>
@@ -566,6 +593,8 @@ if ($db_connected && $pdo) {
                                                 "name" => $p["name"],
                                                 "company" => $p["company_name"] ?? "General Pharma",
                                                 "category" => $p["category_name"] ?? "General Dosage",
+                                                "batch" => $p["batch_no"] ?? "—",
+                                                "expiry" => !empty($p["expiry_date"]) ? date("d-M-Y", strtotime($p["expiry_date"])) : "—",
                                                 "stock_unit" => $p["stock_unit"] ?? "Pack",
                                                 "p_box" => $p_box,
                                                 "t_pack" => $t_pack,
@@ -623,6 +652,12 @@ if ($db_connected && $pdo) {
                     </span>
                     <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
                         <i class="fa-solid fa-capsules text-teal me-1" style="color:#0d9488;"></i> <span id="vProdCategory">Category</span>
+                    </span>
+                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
+                        <i class="fa-solid fa-barcode text-secondary me-1"></i> Batch: <strong id="vProdBatch" class="font-monospace text-primary">—</strong>
+                    </span>
+                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
+                        <i class="fa-regular fa-calendar-alt text-danger me-1"></i> Expiry: <strong id="vProdExpiry">—</strong>
                     </span>
                     <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
                         <i class="fa-solid fa-layer-group text-success me-1"></i> Unit: <strong>Pieces (Pcs)</strong>
@@ -687,6 +722,8 @@ function showProductModal(p) {
     document.getElementById('vProdName').textContent = p.name || '';
     document.getElementById('vProdCompany').textContent = p.company || 'General Pharma';
     document.getElementById('vProdCategory').textContent = p.category || 'General Dosage';
+    if (document.getElementById('vProdBatch')) document.getElementById('vProdBatch').textContent = p.batch || '—';
+    if (document.getElementById('vProdExpiry')) document.getElementById('vProdExpiry').textContent = p.expiry || '—';
     if (document.getElementById('vBtnEdit')) document.getElementById('vBtnEdit').href = 'edit_product.php?id=' + p.id;
 
     const tp   = parseFloat(p.tp) || 0;

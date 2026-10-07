@@ -553,11 +553,18 @@ if (!function_exists('canAddCustomer')) {
 }
 if (!function_exists('requireRole')) {
     function requireRole(array $roles = ['admin']) {
+        if (session_status() === PHP_SESSION_NONE) {
+            if (file_exists(__DIR__ . '/../config/config.php')) {
+                require_once __DIR__ . '/../config/config.php';
+            } else {
+                @session_start();
+            }
+        }
         $role = strtolower($_SESSION['user_role'] ?? $_SESSION['role'] ?? '');
         $allowed = array_map('strtolower', (array)$roles);
         if (!in_array($role, $allowed, true)) {
             $_SESSION['error'] = 'Access denied. You do not have permission to access this page.';
-            $target = defined('BASE_URL') ? BASE_URL . 'index.php' : 'index.php';
+            $target = defined('BASE_URL') ? BASE_URL . 'index.php' : '/Bestway_update/index.php';
             header('Location: ' . $target);
             exit;
         }

@@ -2,6 +2,8 @@
 /**
  * Bestway Distribution - Pharmaceutical Companies & Manufacturers Management
  */
+require_once __DIR__ . '/../../config/config.php';
+require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/functions.php';
 requireRole(['admin']);
 $page_title = "Pharma Companies / Manufacturers";

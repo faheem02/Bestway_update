@@ -37,6 +37,16 @@ if (!$prod) {
     exit;
 }
 
+// Fetch latest batch info
+$latest_batch = null;
+if ($db_connected && $pdo) {
+    try {
+        $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+        $b_stmt->execute([$product_id]);
+        $latest_batch = $b_stmt->fetch();
+    } catch (Exception $e) {}
+}
+
 // Handle Form Submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
     $product_code     = trim($_POST['product_code'] ?? $prod['product_code']);
@@ -83,6 +93,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                     $reorder_level, $status, $product_id
                 ]);
 
+                // Update / create batch in product_batches
+                $batch_no    = trim($_POST['batch_no'] ?? '');
+                $expiry_date = trim($_POST['expiry_date'] ?? '');
+                if (!empty($batch_no)) {
+                    if ($latest_batch) {
+                        $upd_b = $pdo->prepare("UPDATE product_batches SET batch_no = ?, expiry_date = COALESCE(NULLIF(?, ''), expiry_date) WHERE id = ?");
+                        $upd_b->execute([$batch_no, $expiry_date ?: null, $latest_batch['id']]);
+                    } else {
+                        $ins_b = $pdo->prepare("INSERT INTO product_batches (product_id, batch_no, manufacturing_date, expiry_date, purchase_price, trade_price, retail_price, initial_quantity, current_stock, status) VALUES (?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, 'Active')");
+                        $ins_b->execute([$product_id, $batch_no, !empty($expiry_date) ? $expiry_date : date('Y-m-d', strtotime('+2 years')), $purchase_price, $trade_price, $retail_price, $prod['current_stock'], $prod['current_stock']]);
+                    }
+                }
+
                 $message = "Product '{$name}' updated successfully!";
                 $msg_type = "success";
 
@@ -90,6 +113,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                 $stmt = $pdo->prepare("SELECT * FROM products WHERE id = ?");
                 $stmt->execute([$product_id]);
                 $prod = $stmt->fetch();
+
+                // Re-fetch batch
+                $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+                $b_stmt->execute([$product_id]);
+                $latest_batch = $b_stmt->fetch();
 
             } catch (Exception $e) {
                 $message = "Error: " . $e->getMessage();
@@ -209,6 +237,20 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           <label class="form-label font-weight-bold">Current Stock (Pcs)</label>
           <input type="text" class="form-control text-center font-weight-bold bg-light" value="<?= htmlspecialchars($prod['current_stock']) ?> Pcs" readonly>
           <small class="text-muted">Managed via Purchases & Sales</small>
+        </div>
+
+        <!-- Batch Number -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Batch Number</label>
+          <input type="text" name="batch_no" class="form-control font-monospace" placeholder="e.g. BT-1024" value="<?= htmlspecialchars($latest_batch['batch_no'] ?? '') ?>">
+          <small class="text-muted">Primary / Active batch number</small>
+        </div>
+
+        <!-- Expiry Date -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Expiry Date</label>
+          <input type="date" name="expiry_date" class="form-control" value="<?= htmlspecialchars(!empty($latest_batch['expiry_date']) ? date('Y-m-d', strtotime($latest_batch['expiry_date'])) : '') ?>">
+          <small class="text-muted">Expiry date of the batch</small>
         </div>
 
         <!-- Reorder Level -->

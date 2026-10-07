@@ -2,6 +2,8 @@
 /**
  * Bestway Distribution - Add Opening Stock & Inventory Inward
  */
+require_once __DIR__ . '/../../config/config.php';
+require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../includes/functions.php';
 requireRole(['admin']);
 $page_title = "Add Opening Stock & Batches";

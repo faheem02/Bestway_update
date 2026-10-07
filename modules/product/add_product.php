@@ -102,6 +102,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
     $purchase_price   = $trade_price;
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
     $opening_stock    = intval($_POST['opening_stock'] ?? 0);
+    $batch_no         = trim($_POST['batch_no'] ?? '');
+    $expiry_date      = trim($_POST['expiry_date'] ?? '');
     $location_rack    = trim($_POST['location_rack'] ?? '');
     $status           = in_array($_POST['status'] ?? '', ['Active', 'Inactive']) ? $_POST['status'] : 'Active';
 
@@ -172,10 +174,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
 
                 $last_inserted_id = $pdo->lastInsertId();
 
-                // 2. If opening stock > 0, create default batch record in product_batches
-                if ($opening_stock > 0) {
-                    $auto_batch = "BAT-" . date('ymd');
-                    $auto_expiry = date('Y-m-d', strtotime('+2 years'));
+                // 2. Create batch record in product_batches (if opening_stock > 0 or batch_no provided)
+                if ($opening_stock > 0 || !empty($batch_no)) {
+                    $final_batch = !empty($batch_no) ? $batch_no : ("BAT-" . date('ymd'));
+                    $final_expiry = !empty($expiry_date) ? $expiry_date : date('Y-m-d', strtotime('+2 years'));
 
                     try {
                         $batch_stmt = $pdo->prepare("
@@ -187,8 +189,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
                         ");
                         $batch_stmt->execute([
                             $last_inserted_id,
-                            $auto_batch,
-                            $auto_expiry,
+                            $final_batch,
+                            $final_expiry,
                             $purchase_price,
                             $trade_price,
                             $retail_price,
@@ -197,24 +199,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
                         ]);
 
                         // 3. Log to opening_stock_logs
-                        $log_stmt = $pdo->prepare("
-                            INSERT INTO opening_stock_logs (
-                                product_id, batch_no, expiry_date, quantity,
-                                purchase_rate, trade_rate, total_value, entry_date, remarks, created_by
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), 'Opening stock added during product creation', ?)
-                        ");
-                        $total_val = $opening_stock * ($purchase_price > 0 ? $purchase_price : $trade_price);
-                        $user_id = $_SESSION['user_id'] ?? 1;
-                        $log_stmt->execute([
-                            $last_inserted_id,
-                            $auto_batch,
-                            $auto_expiry,
-                            $opening_stock,
-                            $purchase_price,
-                            $trade_price,
-                            $total_val,
-                            $user_id
-                        ]);
+                        if ($opening_stock > 0) {
+                            $log_stmt = $pdo->prepare("
+                                INSERT INTO opening_stock_logs (
+                                    product_id, batch_no, expiry_date, quantity,
+                                    purchase_rate, trade_rate, total_value, entry_date, remarks, created_by
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), 'Opening stock added during product creation', ?)
+                            ");
+                            $total_val = $opening_stock * ($purchase_price > 0 ? $purchase_price : $trade_price);
+                            $user_id = $_SESSION['user_id'] ?? 1;
+                            $log_stmt->execute([
+                                $last_inserted_id,
+                                $final_batch,
+                                $final_expiry,
+                                $opening_stock,
+                                $purchase_price,
+                                $trade_price,
+                                $total_val,
+                                $user_id
+                            ]);
+                        }
                     } catch (Exception $ex_batch) {}
                 }
 
@@ -350,6 +354,20 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           <label class="form-label font-weight-bold">Opening Stock (Quantity in Pcs)</label>
           <input type="number" min="0" name="opening_stock" class="form-control text-center font-weight-bold" placeholder="0" value="" onfocus="this.select()">
           <small class="text-muted">Direct pieces available in stock</small>
+        </div>
+
+        <!-- Batch Number -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Batch Number</label>
+          <input type="text" name="batch_no" class="form-control font-monospace" placeholder="e.g. BT-<?= date('md') ?>" value="BT-<?= date('md') ?>">
+          <small class="text-muted">Batch / Lot number</small>
+        </div>
+
+        <!-- Expiry Date -->
+        <div class="col-md-4 mb-3">
+          <label class="form-label font-weight-bold">Expiry Date</label>
+          <input type="date" name="expiry_date" class="form-control" value="<?= date('Y-m-d', strtotime('+2 years')) ?>">
+          <small class="text-muted">Medicine expiry date</small>
         </div>
 
         <!-- Reorder Level -->
