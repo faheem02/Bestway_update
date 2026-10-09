@@ -122,16 +122,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                 $total_return_amount = 0;
 
                 foreach ($items as $pi_id => $ret_data) {
-                    $ret_qty   = intval($ret_data['qty'] ?? 0);
+                    $ret_qty   = intval($ret_data['quantity'] ?? $ret_data['qty'] ?? 0);
                     $max_qty   = intval($ret_data['max_qty'] ?? 0);
                     $pid       = intval($ret_data['product_id'] ?? 0);
-                    $pname     = trim($ret_data['product_name'] ?? 'Product');
+                    $pname     = trim($ret_data['item_name'] ?? $ret_data['product_name'] ?? 'Product');
                     $bno       = trim($ret_data['batch_no'] ?? '');
-                    $unit_price = floatval($ret_data['price'] ?? 0);
+                    $unit_price = floatval($ret_data['purchase_price'] ?? $ret_data['price'] ?? 0);
                     $condition = trim($ret_data['condition'] ?? 'Good');
+                    $purchase_item_id = intval($ret_data['purchase_item_id'] ?? $pi_id);
 
                     if ($ret_qty > 0) {
-                        if ($ret_qty > $max_qty) {
+                        if ($max_qty > 0 && $ret_qty > $max_qty) {
                             throw new Exception("Error: Return quantity ({$ret_qty}) for product '{$pname}' cannot exceed purchased quantity ({$max_qty}).");
                         }
 
@@ -146,7 +147,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                             'price'            => $unit_price,
                             'total'            => $line_total,
                             'condition'        => $condition,
-                            'purchase_item_id' => $pi_id
+                            'purchase_item_id' => $purchase_item_id
                         ];
                     }
                 }
@@ -196,7 +197,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                 }
 
                 // 3. Financial Settlement
-                if ($refund_type === 'Adjust / Deduct Supplier Balance') {
+                if ($refund_type === 'Adjust / Deduct Supplier Balance' || $refund_type === 'Adjust / Deduct Customer Balance') {
                     // Reduce payable to supplier
                     $stmt_sbal = $pdo->prepare("SELECT current_balance FROM suppliers WHERE id = ? FOR UPDATE");
                     $stmt_sbal->execute([$supplier_id]);
@@ -227,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                 }
 
                 $pdo->commit();
-                $message = "Purchase Return #{$return_no} kamiyabi se save ho gaya aur warehouse stock se items deduct kar diye gaye hain!";
+                $message = "Purchase Return #{$return_no} kamiyabi se save ho gaya aur warehouse stock se items deduct kar diye gaye hain! <a href='print_purchase_return.php?id={$return_id}' target='_blank' class='fw-bold text-dark text-decoration-underline ms-2'><i class='fa-solid fa-print'></i> Print Debit Note</a>";
                 $msg_type = "success";
 
                 // Refresh sequence number
@@ -391,11 +392,11 @@ if ($db_connected && $pdo) {
     <div class="return-card p-4 p-md-5 mb-4">
 
         <div class="mb-4 pb-3 border-bottom">
-            <div class="section-tag"><i class="fa-solid fa-file-invoice"></i> STEP 1: SELECT SALES INVOICE</div>
+            <div class="section-tag"><i class="fas fa-file-invoice mr-1"></i> STEP 1: SELECT PURCHASE BILL / INVOICE</div>
             
             <div class="row g-3">
                 <div class="col-md-5">
-                    <label class="form-label small fw-bold text-muted mb-1">Select Sales Invoice <span class="text-danger">*</span></label>
+                    <label class="form-label small fw-bold text-muted mb-1">Select Purchase Bill / Invoice <span class="text-danger">*</span></label>
                     <select name="purchase_id" id="purchaseSelect" class="form-select" onchange="loadPurchaseForReturn(this.value)" required>
                         <option value="">-- Choose Purchase Invoice --</option>
                         <?php foreach ($purchases_list as $pur): ?>
@@ -434,11 +435,11 @@ if ($db_connected && $pdo) {
 
         <!-- Step 2: Returned Products Table -->
         <div class="mb-4">
-            <div class="section-tag"><i class="fa-solid fa-pills"></i> STEP 2: INVOICED PRODUCTS TO RETURN</div>
+            <div class="section-tag"><i class="fas fa-pills mr-1"></i> STEP 2: INVOICED PRODUCTS TO RETURN</div>
 
             <?php if (empty($selected_items)): ?>
                 <div class="p-5 text-center border rounded-3 bg-light text-muted">
-                    <i class="fa-solid fa-hand-pointer fs-2 mb-2 text-secondary d-block"></i>
+                    <i class="fas fa-hand-pointer fa-2x mb-2 text-secondary d-block"></i>
                     Please <strong>select a purchase bill / invoice</strong> above to load its products.
                 </div>
             <?php else: ?>
@@ -448,9 +449,9 @@ if ($db_connected && $pdo) {
                             <tr>
                                 <th style="width: 45px;" class="text-center">#</th>
                                 <th>MEDICINE / PRODUCT NAME</th>
-                                <th style="width: 110px;" class="text-center">SOLD QTY</th>
+                                <th style="width: 110px;" class="text-center">PURCHASED QTY</th>
                                 <th style="width: 140px;" class="text-center">RETURN QTY <span class="text-danger">*</span></th>
-                                <th style="width: 130px;" class="text-end">SOLD PRICE (RS)</th>
+                                <th style="width: 130px;" class="text-end">PURCHASE PRICE (RS)</th>
                                 <th style="width: 180px;">CONDITION</th>
                                 <th style="width: 140px;" class="text-end">REFUND AMOUNT</th>
                             </tr>
@@ -469,10 +470,12 @@ if ($db_connected && $pdo) {
                                             <span class="badge bg-light text-secondary border ms-1 font-monospace"><?= htmlspecialchars($it['batch_no']) ?></span>
                                         <?php endif; ?>
                                         <input type="hidden" name="items[<?= $idx ?>][product_id]" value="<?= $it['product_id'] ?>">
+                                        <input type="hidden" name="items[<?= $idx ?>][product_name]" value="<?= htmlspecialchars($p_name) ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][item_name]" value="<?= htmlspecialchars($p_name) ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][batch_no]" value="<?= htmlspecialchars($it['batch_no'] ?? 'DEFAULT') ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][purchase_item_id]" value="<?= $it['id'] ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][purchase_price]" id="price_<?= $idx ?>" value="<?= $pp ?>">
+                                        <input type="hidden" name="items[<?= $idx ?>][price]" value="<?= $pp ?>">
                                         <input type="hidden" name="items[<?= $idx ?>][max_qty]" value="<?= $purchased_q ?>">
                                     </td>
                                     <td class="text-center fw-bold text-secondary"><?= $purchased_q ?></td>
@@ -502,7 +505,7 @@ if ($db_connected && $pdo) {
                     <div class="col-md-6">
                         <div class="mb-3">
                             <label class="form-label small fw-bold text-muted mb-1">Return Reason / Remarks</label>
-                            <textarea name="reason" class="form-control" rows="3" placeholder="Customer excess order, expired stock claim, packaging damaged etc..."></textarea>
+                            <textarea name="reason" class="form-control" rows="3" placeholder="Supplier excess dispatch, expired stock claim, packaging damaged etc..."></textarea>
                         </div>
                     </div>
 
@@ -511,7 +514,7 @@ if ($db_connected && $pdo) {
                             <div class="mb-3">
                                 <label class="form-label small fw-bold text-muted mb-1">Refund Method</label>
                                 <select name="refund_type" id="refundTypeSelect" class="form-select fw-semibold" onchange="toggleAccountDropdown()">
-                                    <option value="Adjust / Deduct Customer Balance">Adjust / Deduct Customer Balance</option>
+                                    <option value="Adjust / Deduct Supplier Balance">Adjust / Deduct Supplier Balance</option>
                                     <option value="Cash Refund">Cash Refund (Pay from Cash Account)</option>
                                     <option value="Bank Refund">Bank Transfer Refund</option>
                                 </select>
@@ -542,7 +545,7 @@ if ($db_connected && $pdo) {
 
                             <div class="mt-4">
                                 <button type="submit" name="save_return" class="btn btn-danger w-100 fw-bold py-2 shadow-sm text-uppercase">
-                                    <i class="fa-solid fa-check me-1"></i> Confirm & Save Return
+                                    <i class="fas fa-check mr-1"></i> Confirm & Save Return
                                 </button>
                             </div>
                         </div>
@@ -558,7 +561,7 @@ if ($db_connected && $pdo) {
 <!-- Recent Purchase Returns Table -->
 <?php if (!empty($recent_returns)): ?>
     <div class="return-card p-4">
-        <div class="section-tag mb-3"><i class="fa-solid fa-history"></i> Recent Purchase Return Records</div>
+        <div class="section-tag mb-3"><i class="fas fa-history mr-1"></i> Recent Purchase Return Records</div>
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead class="table-light text-uppercase text-muted small" style="font-size: 0.76rem;">
@@ -570,7 +573,7 @@ if ($db_connected && $pdo) {
                         <th class="text-center">Items</th>
                         <th class="text-end">Total Amount</th>
                         <th class="text-center">Status</th>
-                        <th class="text-center" style="width: 70px;">Action</th>
+                        <th class="text-center" style="width: 125px;">Action</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -598,17 +601,34 @@ if ($db_connected && $pdo) {
                                 <span class="fw-bold text-danger font-monospace">Rs. <?= number_format($rt['total_amount'], 2) ?></span>
                             </td>
                             <td class="text-center">
-                                <span class="badge bg-success-subtle text-success border border-success">
-                                    <?= htmlspecialchars($rt['status']) ?>
+                                <?php 
+                                $st = !empty($rt['status']) ? $rt['status'] : 'Completed';
+                                $badge_cls = ($st === 'Completed' || $st === 'Adjusted') ? 'badge-success' : (($st === 'Pending') ? 'badge-warning' : 'badge-danger');
+                                ?>
+                                <span class="badge <?= $badge_cls ?> px-2 py-1" style="font-size: 0.78rem;">
+                                    <i class="fas fa-check-circle mr-1"></i> <?= htmlspecialchars($st) ?>
                                 </span>
                             </td>
                             <td class="text-center">
-                                <a href="purchase_return.php?action=delete&id=<?= $rt['id'] ?>" 
-                                   class="btn btn-sm btn-outline-danger" 
-                                   title="Cancel Return & Revert Stock"
-                                   onclick="return confirm('Are you sure you want to cancel this purchase return and revert stock and supplier balance?');">
-                                    <i class="fa-solid fa-trash"></i>
-                                </a>
+                                <div class="d-flex justify-content-center align-items-center" style="gap: 5px;">
+                                    <a href="print_purchase_return.php?id=<?= $rt['id'] ?>" 
+                                       target="_blank" 
+                                       class="btn btn-sm btn-outline-primary px-2 py-1" 
+                                       title="Print Debit Note / Voucher">
+                                        <i class="fas fa-print"></i>
+                                    </a>
+                                    <a href="edit_purchase_return.php?id=<?= $rt['id'] ?>" 
+                                       class="btn btn-sm btn-outline-info px-2 py-1" 
+                                       title="Edit Purchase Return">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    <a href="purchase_return.php?action=delete&id=<?= $rt['id'] ?>" 
+                                       class="btn btn-sm btn-outline-danger px-2 py-1" 
+                                       title="Cancel Return & Revert Stock"
+                                       onclick="return confirm('Are you sure you want to cancel this purchase return and revert stock and supplier balance?');">
+                                        <i class="fas fa-trash-alt"></i>
+                                    </a>
+                                </div>
                             </td>
                         </tr>
                     <?php endforeach; ?>

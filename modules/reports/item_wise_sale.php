@@ -55,6 +55,21 @@ $summary = [
     'total_cost' => 0, 'total_margin' => 0,
 ];
 
+// SQL expression to determine accurate unit cost price:
+// 1. Inward net unit cost from actual purchase bills (purchase_items: total_price / (qty + bonus))
+// 2. Batch purchase price (if batch tracked)
+// 3. Product purchase_price (when lower than trade_price)
+// 4. Default wholesale cost (trade_price * 0.85, representing standard 15% wholesale distribution margin)
+$cost_unit_expr = "COALESCE(pi_cost.net_cost, pb.purchase_price, CASE WHEN p.purchase_price > 0 AND p.purchase_price < p.trade_price THEN p.purchase_price WHEN p.trade_price > 0 THEN p.trade_price * 0.85 ELSE p.purchase_price END, 0)";
+
+$pi_cost_join = "LEFT JOIN (
+    SELECT product_id, 
+           ROUND(SUM(total_price) / SUM(quantity + bonus_quantity), 2) as net_cost
+    FROM purchase_items
+    GROUP BY product_id
+    HAVING net_cost > 0
+) pi_cost ON pi_cost.product_id = p.id";
+
 // ---- Summary metrics ----
 $summary_sql = "SELECT
     COUNT(DISTINCT COALESCE(p.id, it.product_id)) AS total_products,
@@ -64,13 +79,14 @@ $summary_sql = "SELECT
     COALESCE(SUM(it.unit_price * it.quantity), 0) AS total_gross,
     COALESCE(SUM(it.unit_price * it.quantity) - SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)), 0) AS total_discount,
     COALESCE(SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)), 0) AS total_net,
-    COALESCE(SUM(it.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)), 0) AS total_cost,
-    COALESCE(SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)), 0) AS total_margin
+    COALESCE(SUM(it.quantity * {$cost_unit_expr}), 0) AS total_cost,
+    COALESCE(SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * {$cost_unit_expr}), 0) AS total_margin
 FROM sale_items it
 JOIN sales_invoices si ON it.invoice_id = si.id
 LEFT JOIN products p ON p.id = it.product_id
 LEFT JOIN product_batches pb ON pb.id = it.batch_id
 LEFT JOIN customers c ON c.id = si.customer_id
+{$pi_cost_join}
 WHERE {$where_sql}";
 
 $stmt_sum = $conn->prepare($summary_sql);
@@ -91,16 +107,17 @@ $list_sql = "SELECT
     SUM(it.quantity) AS total_qty,
     SUM(COALESCE(it.bonus_quantity, 0)) AS total_bonus,
     ROUND(AVG(it.unit_price), 2) AS avg_unit_price,
-    ROUND(AVG(COALESCE(pb.purchase_price, p.purchase_price, 0)), 2) AS avg_cost_price,
+    ROUND(AVG({$cost_unit_expr}), 2) AS avg_cost_price,
     SUM(it.unit_price * it.quantity) AS gross_amount,
     SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) AS net_amount,
-    SUM(it.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)) AS total_cost,
-    (SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0))) AS margin_amount
+    SUM(it.quantity * {$cost_unit_expr}) AS total_cost,
+    (SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * {$cost_unit_expr})) AS margin_amount
 FROM sale_items it
 JOIN sales_invoices si ON it.invoice_id = si.id
 LEFT JOIN products p ON p.id = it.product_id
 LEFT JOIN product_batches pb ON pb.id = it.batch_id
 LEFT JOIN customers c ON c.id = si.customer_id
+{$pi_cost_join}
 WHERE {$where_sql}
 GROUP BY product_id, item_name, p.product_code
 ORDER BY net_amount DESC, total_qty DESC";
@@ -113,12 +130,34 @@ $stmt_list->execute();
 $sales_items = $stmt_list->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt_list->close();
 
-// ---- Fetch Sales Returns matching the same invoice filter criteria ----
+// ---- Fetch Sales Returns matching the filter criteria ----
 $ret_where = ["sr.status = 'Completed'"];
-$ret_params = $params;
-$ret_types  = $types;
+$ret_params = [];
+$ret_types  = "";
 
-$ret_where[] = $where_sql;
+if (!empty($start_date)) {
+    $ret_where[] = "COALESCE(si.invoice_date, sr.return_date) >= ?";
+    $ret_params[] = $start_date;
+    $ret_types .= "s";
+}
+if (!empty($end_date)) {
+    $ret_where[] = "COALESCE(si.invoice_date, sr.return_date) <= ?";
+    $ret_params[] = $end_date;
+    $ret_types .= "s";
+}
+if ($area !== '') {
+    $ret_where[] = "(LOWER(COALESCE(si.route_name, '')) = LOWER(?) OR LOWER(COALESCE(c.area, '')) = LOWER(?))";
+    $ret_params[] = $area;
+    $ret_params[] = $area;
+    $ret_types .= "ss";
+}
+if ($salesman_id > 0) {
+    $ret_where[] = "(si.booker_id = ? OR sr.created_by = ?)";
+    $ret_params[] = $salesman_id;
+    $ret_params[] = $salesman_id;
+    $ret_types .= "ii";
+}
+
 $ret_where_sql = implode(" AND ", $ret_where);
 
 $ret_sql = "
@@ -128,13 +167,14 @@ $ret_sql = "
         COALESCE(p.name, 'Item') AS product_name,
         COALESCE(SUM(sri.quantity), 0) AS returned_qty,
         COALESCE(SUM(sri.total_price), 0) AS returned_amount,
-        COALESCE(SUM(sri.quantity * COALESCE(pb.purchase_price, p.purchase_price, 0)), 0) AS returned_cost
+        COALESCE(SUM(sri.quantity * {$cost_unit_expr}), 0) AS returned_cost
     FROM sale_returns sr
     JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
-    JOIN sales_invoices si ON (si.id = sr.sale_id OR (sr.sale_id IS NULL AND si.id = sr.invoice_id))
+    LEFT JOIN sales_invoices si ON (si.id = sr.sale_id OR (sr.sale_id IS NOT NULL AND si.id = sr.invoice_id))
     LEFT JOIN products p ON p.id = sri.product_id
     LEFT JOIN product_batches pb ON (pb.batch_no = sri.batch_no AND pb.product_id = sri.product_id)
-    LEFT JOIN customers c ON c.id = si.customer_id
+    LEFT JOIN customers c ON c.id = COALESCE(si.customer_id, sr.customer_id)
+    {$pi_cost_join}
     WHERE {$ret_where_sql}
     GROUP BY sri.product_id, p.product_code, p.name
 ";

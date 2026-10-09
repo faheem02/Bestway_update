@@ -348,6 +348,24 @@ if (!function_exists('syncCustomerLedger')) {
                 ];
             }
 
+            // Fetch sale returns (credit note / balance adjustments)
+            $stmt_ret = $pdo->prepare("SELECT id, return_no, return_date, total_amount, reason FROM sale_returns WHERE customer_id = ? AND status = 'Completed' AND refund_type IN ('Deduct Balance', 'Credit Note', 'Store Credit', 'Adjust / Deduct Customer Balance') ORDER BY return_date ASC, id ASC");
+            $stmt_ret->execute([$customer_id]);
+            $returns = $stmt_ret->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($returns as $ret) {
+                $txns[] = [
+                    'date'        => $ret['return_date'],
+                    'created_id'  => (int)$ret['id'],
+                    'sort_order'  => 15,
+                    'type'        => 'Sale Return',
+                    'ref'         => $ret['return_no'],
+                    'debit'       => 0.0,
+                    'credit'      => (float)$ret['total_amount'],
+                    'description' => 'Sale Return #' . $ret['return_no'] . (!empty($ret['reason']) ? ' — ' . $ret['reason'] : '')
+                ];
+            }
+
             // Sort chronologically by date, then sort_order, then id
             usort($txns, function($a, $b) {
                 $cmp = strcmp($a['date'], $b['date']);

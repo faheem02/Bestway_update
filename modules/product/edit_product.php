@@ -54,14 +54,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
     $company_id       = !empty($_POST['company_id']) ? intval($_POST['company_id']) : null;
     $category_id      = !empty($_POST['category_id']) ? intval($_POST['category_id']) : null;
     $trade_price      = floatval($_POST['trade_price'] ?? 0);
-    $purchase_price   = $trade_price; // TP rate IS the purchase rate
+    $purchase_price   = (floatval($prod['purchase_price'] ?? 0) > 0) ? floatval($prod['purchase_price']) : $trade_price;
     $discount_percent = floatval($_POST['discount_percent'] ?? 0);
+    $entered_wholesale = floatval($_POST['wholesale_price'] ?? 0);
     $calc_sale_price  = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
-    $wholesale_price  = floatval($_POST['wholesale_price'] ?? 0);
-    if ($wholesale_price <= 0 && $trade_price > 0) {
-        $wholesale_price = $calc_sale_price;
-    }
-    $retail_price     = floatval($_POST['retail_price'] ?? $wholesale_price);
+    $wholesale_price  = $entered_wholesale > 0 ? $entered_wholesale : $calc_sale_price;
+    $retail_price     = $wholesale_price;
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
     $status           = in_array($_POST['status'] ?? '', ['Active', 'Inactive']) ? $_POST['status'] : 'Active';
 
@@ -228,7 +226,7 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
         <!-- Sale Rate (Second) -->
         <div class="col-md-4 mb-3">
           <label class="form-label font-weight-bold">Sale Rate (Rs.)</label>
-          <input type="number" step="0.01" min="0" name="wholesale_price" id="wholesale_price" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : ($prod['retail_price'] > 0 ? $prod['retail_price'] : $prod['trade_price'])) ?>">
+          <input type="number" step="0.01" min="0" name="wholesale_price" id="wholesale_price" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : ($prod['retail_price'] > 0 ? $prod['retail_price'] : $prod['trade_price'])) ?>" onfocus="this.select()" oninput="calcEditDiscount()">
           <small class="text-muted">Store selling rate to customers</small>
         </div>
 
@@ -294,6 +292,21 @@ function calcEditSaleRate() {
     const saleInput = document.getElementById('wholesale_price');
     if (saleInput) {
         saleInput.value = netSale > 0 ? netSale.toFixed(2) : (tp > 0 ? tp.toFixed(2) : '0.00');
+    }
+}
+
+function calcEditDiscount() {
+    const tp = parseFloat(document.getElementById('trade_price')?.value) || 0;
+    const sale = parseFloat(document.getElementById('wholesale_price')?.value) || 0;
+    const discInput = document.getElementById('discount_percent');
+    if (!discInput) return;
+
+    if (tp > 0) {
+        const diff = tp - sale;
+        const disc = (diff / tp) * 100;
+        discInput.value = (disc > 0 ? disc : 0).toFixed(2);
+    } else {
+        discInput.value = '0.00';
     }
 }
 </script>

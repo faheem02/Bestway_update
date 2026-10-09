@@ -6,7 +6,7 @@ require_once __DIR__ . '/config.php';
 $db_host = 'localhost';
 $db_user = 'root';
 $db_pass = '';
-$db_name = 'bestway_wholesale2';
+$db_name = 'bestway_live';
 
 $db_connected = false;
 $pdo = null;

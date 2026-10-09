@@ -1,21 +1,136 @@
 <?php
 /**
  * Bestway Wholesale Distribution - Customer Sales Return
- * Return medicines against invoice, replenish inventory & adjust customer balance
+ * Direct Product-Wise Return: Select customer, search medicines by alphabet, set quantity & rate, replenish inventory & adjust customer balance.
  */
-$page_title = "Customer Sale Return";
+$page_title = "Customer Sales Return";
 require_once __DIR__ . '/../../config/config.php';
 require_once __DIR__ . '/../../config/database.php';
-require_once __DIR__ . '/../../includes/header.php';
+require_once __DIR__ . '/../../includes/functions.php';
+
+// AJAX endpoint for live alphabet-wise product search
+if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
+    header('Content-Type: application/json');
+    $q = trim($_GET['q'] ?? '');
+    $res = [];
+    if ($db_connected && $pdo) {
+        $sql = "SELECT p.id, p.product_code, p.name, p.generic_name, 
+                       COALESCE(NULLIF(p.trade_price, 0), NULLIF(p.retail_price, 0), p.purchase_price, 0) as trade_price,
+                       p.current_stock, p.stock_unit,
+                       c.name as company_name 
+                FROM products p 
+                LEFT JOIN companies c ON c.id = p.company_id 
+                WHERE p.status = 'Active'";
+        if ($q !== '') {
+            $sql .= " AND (p.name LIKE :q1 OR p.product_code LIKE :q2 OR p.generic_name LIKE :q3 OR c.name LIKE :q4)
+                      ORDER BY 
+                        CASE 
+                          WHEN p.name LIKE :exact THEN 1
+                          WHEN p.name LIKE :start THEN 2
+                          WHEN c.name LIKE :start_c THEN 3
+                          ELSE 4
+                        END, p.name ASC 
+                      LIMIT 35";
+            $stmt = $pdo->prepare($sql);
+            $like = "%$q%";
+            $stmt->execute([
+                ':q1' => $like,
+                ':q2' => $like,
+                ':q3' => $like,
+                ':q4' => $like,
+                ':exact' => $q,
+                ':start' => "$q%",
+                ':start_c' => "$q%"
+            ]);
+        } else {
+            $stmt = $pdo->prepare($sql . " ORDER BY p.name ASC LIMIT 50");
+            $stmt->execute();
+        }
+        $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    echo json_encode($res);
+    exit;
+}
 
 requireRole(['admin']);
-
-// Database connection for sales invoices
+require_once __DIR__ . '/../../includes/header.php';
 
 $message = "";
 $msg_type = "";
 
-// Auto-generate Return No
+// Flash message support
+if (!empty($_SESSION['flash_message'])) {
+    $message = $_SESSION['flash_message'];
+    $msg_type = $_SESSION['flash_type'] ?? 'info';
+    unset($_SESSION['flash_message'], $_SESSION['flash_type']);
+}
+
+// Handle Delete Return Action (Revert Stock & Accounts)
+if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id'])) {
+    $del_id = intval($_GET['id']);
+    if ($db_connected && $pdo && $del_id > 0) {
+        try {
+            $pdo->beginTransaction();
+
+            $stmt_ret = $pdo->prepare("SELECT * FROM sale_returns WHERE id = ?");
+            $stmt_ret->execute([$del_id]);
+            $ret_data = $stmt_ret->fetch(PDO::FETCH_ASSOC);
+
+            if ($ret_data) {
+                // 1. Fetch return items to revert stock
+                $stmt_ritems = $pdo->prepare("SELECT product_id, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
+                $stmt_ritems->execute([$del_id, $del_id]);
+                $ritems = $stmt_ritems->fetchAll(PDO::FETCH_ASSOC);
+
+                $stmt_sub_stock = $pdo->prepare("UPDATE products SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
+
+                foreach ($ritems as $ri) {
+                    $cond = $ri['condition'] ?? 'Good';
+                    if ($cond === 'Good / Resalable' || $cond === 'Good') {
+                        $stmt_sub_stock->execute([$ri['quantity'], $ri['product_id']]);
+                    }
+                }
+
+                // 2. Revert refund if cash, bank, or customer balance
+                $ret_amt = floatval($ret_data['total_amount']);
+                $refund_type = $ret_data['refund_type'] ?? '';
+                $cash_acc_id = !empty($ret_data['cash_account_id']) ? intval($ret_data['cash_account_id']) : 0;
+                $bank_acc_id = !empty($ret_data['bank_account_id']) ? intval($ret_data['bank_account_id']) : 0;
+                $cust_id = intval($ret_data['customer_id'] ?? 0);
+
+                if ($refund_type === 'Cash Refund' && $cash_acc_id > 0) {
+                    $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$ret_amt, $cash_acc_id]);
+                } elseif ($refund_type === 'Bank Refund' && $bank_acc_id > 0) {
+                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $bank_acc_id]);
+                } elseif ($refund_type === 'Deduct Balance' || $refund_type === 'Store Credit' || $refund_type === 'Credit Note' || $refund_type === 'Adjust / Deduct Customer Balance') {
+                    if ($cust_id > 0 && $ret_amt > 0) {
+                        $pdo->prepare("UPDATE customers SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $cust_id]);
+                    }
+                }
+
+                // 3. Delete items & return
+                $pdo->prepare("DELETE FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?")->execute([$del_id, $del_id]);
+                $pdo->prepare("DELETE FROM sale_returns WHERE id = ?")->execute([$del_id]);
+
+                $pdo->commit();
+
+                // 4. Sync customer balance & ledger
+                if ($cust_id > 0 && function_exists('updateCustomerBalance')) {
+                    try { updateCustomerBalance($pdo, $cust_id); } catch (Exception $e) {}
+                }
+
+                $message = "Sale Return #{$ret_data['return_no']} deleted successfully and stock/accounts reverted.";
+                $msg_type = "success";
+            }
+        } catch (Exception $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            $message = "Delete error: " . $e->getMessage();
+            $msg_type = "danger";
+        }
+    }
+}
+
+// Auto-generate Return No (e.g. SRTN-2026-0001)
 $auto_return_no = "SRTN-" . date('Y') . "-0001";
 if ($db_connected && $pdo) {
     try {
@@ -32,6 +147,14 @@ if ($db_connected && $pdo) {
     } catch (Exception $e) {}
 }
 
+// Fetch Active Customers
+$customers_list = [];
+if ($db_connected && $pdo) {
+    try {
+        $customers_list = $pdo->query("SELECT id, name, shop_name, current_balance, area FROM customers WHERE status = 'Active' ORDER BY shop_name ASC, name ASC")->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {}
+}
+
 // Fetch Cash & Bank Accounts
 $cash_accounts = [];
 $bank_accounts = [];
@@ -42,10 +165,10 @@ if ($db_connected && $pdo) {
     } catch (Exception $e) {}
 }
 
-// Handle Form Submission: Create Sale Return
+// Handle Form Submission: Create Sale Return (Direct Product-Wise)
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return'])) {
     $return_no       = trim($_POST['return_no'] ?? $auto_return_no);
-    $invoice_id      = intval($_POST['invoice_id'] ?? 0);
+    $customer_id     = intval($_POST['customer_id'] ?? 0);
     $customer_name   = trim($_POST['customer_name'] ?? '');
     $return_date     = trim($_POST['return_date'] ?? date('Y-m-d'));
     $refund_type     = trim($_POST['refund_type'] ?? 'Deduct Balance');
@@ -54,94 +177,30 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
     $reason          = trim($_POST['reason'] ?? 'Customer Return');
     $items           = $_POST['items'] ?? [];
 
-    if ($invoice_id <= 0) {
-        $message = "Please select a Sales Invoice.";
+    if ($customer_id <= 0) {
+        $message = "Barahe karam Customer / Pharmacy select karein.";
         $msg_type = "danger";
     } elseif (empty($items) || !is_array($items)) {
-        $message = "Please add at least one medicine item to return.";
+        $message = "Barahe karam kam az kam 1 product search karke add karein.";
         $msg_type = "danger";
     } else {
         try {
             $pdo->beginTransaction();
-            $conn->begin_transaction();
-
-            // ── Return price & limits come from the DB, never from the browser ──
-            // sale_items.total_price already has the item discount AND the invoice
-            // level discount applied, so the refund must be taken proportionally
-            // from it. Using unit_price instead would refund the pre-discount
-            // amount (e.g. 50.00 x 50 = 2500 instead of the billed 2300).
-            $sold_map = [];
-            $stmt_sold = $conn->prepare("SELECT id, product_id, item_name, quantity, total_price FROM sale_items WHERE invoice_id = ?");
-            if ($stmt_sold) {
-                $stmt_sold->bind_param("i", $invoice_id);
-                $stmt_sold->execute();
-                $res_sold = $stmt_sold->get_result();
-                while ($row_sold = $res_sold->fetch_assoc()) {
-                    $row_sold['product_id'] = intval($row_sold['product_id']);
-                    $sold_map[$row_sold['product_id']][] = $row_sold;
-                }
-                $stmt_sold->close();
-            }
-
-            // Quantity already returned earlier against this invoice, so the same
-            // stock cannot be returned twice.
-            $returned_map = [];
-            try {
-                $stmt_ret_qty = $conn->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS returned_qty
-                    FROM sale_return_items sri
-                    JOIN sale_returns sr ON (sr.id = sri.return_id OR sr.id = sri.sale_return_id)
-                    WHERE (sr.sale_id = ? OR sr.invoice_id = ?) AND sr.status = 'Completed'
-                    GROUP BY sri.product_id");
-                if ($stmt_ret_qty) {
-                    $stmt_ret_qty->bind_param("ii", $invoice_id, $invoice_id);
-                    $stmt_ret_qty->execute();
-                    $res_rq = $stmt_ret_qty->get_result();
-                    while ($row_rq = $res_rq->fetch_assoc()) {
-                        $returned_map[intval($row_rq['product_id'])] = intval($row_rq['returned_qty']);
-                    }
-                    $stmt_ret_qty->close();
-                }
-            } catch (Exception $e) {}
 
             $total_return_amount = 0;
             $validated_return_items = [];
-            $line_cursor = [];
 
             foreach ($items as $itm) {
                 $pid        = intval($itm['product_id'] ?? 0);
                 $pname      = trim($itm['item_name'] ?? '');
                 $ret_qty    = intval($itm['quantity'] ?? 0);
+                $unit_price = floatval($itm['unit_price'] ?? 0);
                 $condition  = trim($itm['condition'] ?? 'Good / Resalable');
 
-                if ($ret_qty <= 0) continue;
+                if ($pid <= 0 || $ret_qty <= 0) continue;
+                if ($unit_price < 0) $unit_price = 0.0;
 
-                if (empty($sold_map[$pid])) {
-                    throw new Exception("Error: medicine '{$pname}' does not belong to the selected invoice.");
-                }
-
-                // Same product can appear on several invoice lines — consume them in order.
-                $cursor = $line_cursor[$pid] ?? 0;
-                $lines  = $sold_map[$pid];
-                if (!isset($lines[$cursor])) {
-                    throw new Exception("Error: no remaining sold quantity for medicine '{$pname}'.");
-                }
-                $line = $lines[$cursor];
-
-                $sold_qty     = intval($line['quantity']);
-                $line_total   = floatval($line['total_price']);
-                $already_ret  = $returned_map[$pid] ?? 0;
-                $consumed_ret = min($sold_qty, $already_ret);
-                $available    = max(0, $sold_qty - $consumed_ret);
-                $returned_map[$pid] = max(0, $already_ret - $consumed_ret);
-
-                if ($ret_qty > $available) {
-                    throw new Exception("Error: Return quantity ({$ret_qty}) for medicine '{$pname}' cannot exceed returnable quantity ({$available}).");
-                }
-
-                // Take the refund proportionally from the discounted line total.
-                $line_ret = $sold_qty > 0 ? round($line_total * $ret_qty / $sold_qty, 2) : 0.0;
-                $unit_price = $ret_qty > 0 ? round($line_ret / $ret_qty, 2) : 0.0;
-
+                $line_ret = round($ret_qty * $unit_price, 2);
                 $total_return_amount += $line_ret;
 
                 $validated_return_items[] = [
@@ -152,8 +211,6 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
                     'total'      => $line_ret,
                     'condition'  => $condition
                 ];
-
-                $line_cursor[$pid] = $cursor + 1;
             }
 
             if (empty($validated_return_items)) {
@@ -162,32 +219,20 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
 
             $user_id = $_SESSION['user_id'] ?? 1;
 
-            $customer_id = 0;
-            $stmt_cust = $conn->prepare("SELECT customer_id FROM sales_invoices WHERE id = ?");
-            if ($stmt_cust) {
-                $stmt_cust->bind_param("i", $invoice_id);
-                $stmt_cust->execute();
-                $res_cust = $stmt_cust->get_result()->fetch_assoc();
-                if ($res_cust && isset($res_cust['customer_id'])) {
-                    $customer_id = intval($res_cust['customer_id']);
-                }
-                $stmt_cust->close();
-            }
-
-            // 1. Insert into sale_returns table
+            // 1. Insert into sale_returns table (Direct Return: sale_id = NULL, invoice_id = NULL)
             $stmt_ret = $pdo->prepare("
                 INSERT INTO sale_returns (
-                    return_no, sale_id, return_date, customer_id, refund_type,
-                    total_amount, deduction_amount, net_refund_amount, reason, status, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Completed', ?)
+                    return_no, sale_id, invoice_id, return_date, customer_id, refund_type,
+                    total_amount, deduction_amount, net_refund_amount, reason, cash_account_id, bank_account_id, status, created_by
+                ) VALUES (?, NULL, NULL, ?, ?, ?, ?, 0.00, ?, ?, ?, ?, 'Completed', ?)
             ");
             $stmt_ret->execute([
-                $return_no, $invoice_id, $return_date, $customer_id, $refund_type,
-                $total_return_amount, 0.00, $total_return_amount, $reason, $user_id
+                $return_no, $return_date, $customer_id, $refund_type,
+                $total_return_amount, $total_return_amount, $reason, $cash_account_id, $bank_account_id, $user_id
             ]);
             $return_id = $pdo->lastInsertId();
 
-            // 2. Insert line items & restore stock
+            // 2. Insert line items & replenish inventory stock
             $stmt_item = $pdo->prepare("
                 INSERT INTO sale_return_items (return_id, sale_return_id, product_id, quantity, unit_price, total_price, `condition`)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -196,14 +241,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
 
             foreach ($validated_return_items as $vi) {
                 $stmt_item->execute([$return_id, $return_id, $vi['product_id'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
-                if ($vi['condition'] === 'Good / Resalable') {
+                if ($vi['condition'] === 'Good / Resalable' || $vi['condition'] === 'Good') {
                     $stmt_stock->execute([$vi['quantity'], $vi['product_id']]);
                 }
             }
 
-            // 3. Adjust customer balance or cash/bank account if refund
-            if ($refund_type === 'Store Credit' || $refund_type === 'Credit Note') {
+            // 3. Adjust customer balance or cash/bank account
+            if ($refund_type === 'Store Credit' || $refund_type === 'Credit Note' || $refund_type === 'Deduct Balance' || $refund_type === 'Adjust / Deduct Customer Balance') {
                 $pdo->prepare("UPDATE customers SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$total_return_amount, $customer_id]);
+                if (function_exists('updateCustomerBalance')) {
+                    try { updateCustomerBalance($pdo, $customer_id); } catch (Exception $e) {}
+                }
             } elseif ($refund_type === 'Cash Refund' && $cash_account_id) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
             } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
@@ -211,114 +259,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
             }
 
             $pdo->commit();
-            $conn->commit();
 
             $message = "Sale Return #{$return_no} saved successfully and stock restored to inventory! <a href='print_return.php?id={$return_id}' target='_blank' class='fw-bold text-dark text-decoration-underline ms-2'><i class='fa-solid fa-print'></i> Print Return Voucher</a>";
             $msg_type = "success";
 
         } catch (Exception $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
-            $conn->rollback();
             $message = "Error: " . $e->getMessage();
             $msg_type = "danger";
-        }
-    }
-}
-
-// Fetch all available Sales Invoices for the dropdown with their return status
-$invoices_list = [];
-$res_inv = $conn->query("
-    SELECT si.id, si.invoice_no, si.customer_name, si.invoice_date, si.grand_total, si.balance_due,
-           COALESCE(items_stat.total_sold_qty, 0) AS total_sold_qty,
-           COALESCE(ret_stat.total_ret_qty, 0) AS total_ret_qty
-    FROM sales_invoices si
-    LEFT JOIN (
-        SELECT invoice_id, SUM(quantity) AS total_sold_qty
-        FROM sale_items
-        GROUP BY invoice_id
-    ) items_stat ON items_stat.invoice_id = si.id
-    LEFT JOIN (
-        SELECT COALESCE(sr.sale_id, sr.invoice_id) AS inv_id, SUM(sri.quantity) AS total_ret_qty
-        FROM sale_returns sr
-        JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
-        WHERE sr.status = 'Completed'
-        GROUP BY COALESCE(sr.sale_id, sr.invoice_id)
-    ) ret_stat ON ret_stat.inv_id = si.id
-    ORDER BY si.id DESC LIMIT 150
-");
-if ($res_inv) {
-    $invoices_list = $res_inv->fetch_all(MYSQLI_ASSOC);
-}
-
-// Preset Invoice ID from URL if provided
-$selected_invoice_id = intval($_GET['invoice_id'] ?? 0);
-$selected_invoice = null;
-$selected_items = [];
-$existing_invoice_returns = [];
-$already_returned = [];
-$total_inv_sold = 0;
-$total_inv_ret = 0;
-$total_available_to_return = 0;
-
-if ($selected_invoice_id > 0) {
-    $stmt = $conn->prepare("SELECT * FROM sales_invoices WHERE id = ?");
-    $stmt->bind_param("i", $selected_invoice_id);
-    $stmt->execute();
-    $r = $stmt->get_result();
-    $selected_invoice = $r->fetch_assoc();
-    $stmt->close();
-
-    if ($selected_invoice) {
-        $stmt_items = $conn->prepare("SELECT * FROM sale_items WHERE invoice_id = ?");
-        $stmt_items->bind_param("i", $selected_invoice_id);
-        $stmt_items->execute();
-        $r_items = $stmt_items->get_result();
-        $selected_items = $r_items->fetch_all(MYSQLI_ASSOC);
-        $stmt_items->close();
-
-        // How much of each product was already returned
-        try {
-            $stmt_ar = $conn->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS returned_qty
-                FROM sale_return_items sri
-                JOIN sale_returns sr ON (sr.id = sri.return_id OR sr.id = sri.sale_return_id)
-                WHERE (sr.sale_id = ? OR sr.invoice_id = ?) AND sr.status = 'Completed'
-                GROUP BY sri.product_id");
-            if ($stmt_ar) {
-                $stmt_ar->bind_param("ii", $selected_invoice_id, $selected_invoice_id);
-                $stmt_ar->execute();
-                $res_ar = $stmt_ar->get_result();
-                while ($row_ar = $res_ar->fetch_assoc()) {
-                    $already_returned[intval($row_ar['product_id'])] = intval($row_ar['returned_qty']);
-                    $total_inv_ret += intval($row_ar['returned_qty']);
-                }
-                $stmt_ar->close();
-            }
-
-            // Existing return vouchers for this invoice
-            $stmt_eir = $conn->prepare("SELECT id, return_no, return_date, total_amount, status 
-                FROM sale_returns 
-                WHERE (sale_id = ? OR invoice_id = ?) AND status = 'Completed' 
-                ORDER BY id DESC");
-            if ($stmt_eir) {
-                $stmt_eir->bind_param("ii", $selected_invoice_id, $selected_invoice_id);
-                $stmt_eir->execute();
-                $existing_invoice_returns = $stmt_eir->get_result()->fetch_all(MYSQLI_ASSOC);
-                $stmt_eir->close();
-            }
-        } catch (Exception $e) {}
-
-        // Calculate available returnable quantity across items
-        $ret_pool = $already_returned;
-        foreach ($selected_items as $it) {
-            $pid = intval($it['product_id']);
-            $sold_q = intval($it['quantity']);
-            $total_inv_sold += $sold_q;
-
-            $already_ret_this = $ret_pool[$pid] ?? 0;
-            $consume = min($sold_q, $already_ret_this);
-            $ret_avail = max(0, $sold_q - $consume);
-            $ret_pool[$pid] = max(0, $already_ret_this - $consume);
-            $total_available_to_return += $ret_avail;
         }
     }
 }
@@ -328,9 +276,12 @@ $recent_returns = [];
 if ($db_connected && $pdo) {
     try {
         $recent_returns = $pdo->query("
-            SELECT sr.*, COUNT(sri.id) as total_items_count
+            SELECT sr.*, 
+                   COUNT(sri.id) as total_items_count,
+                   c.name as cust_name, c.shop_name as cust_shop
             FROM sale_returns sr
             LEFT JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
+            LEFT JOIN customers c ON c.id = sr.customer_id
             GROUP BY sr.id
             ORDER BY sr.id DESC LIMIT 15
         ")->fetchAll(PDO::FETCH_ASSOC);
@@ -388,6 +339,32 @@ if ($db_connected && $pdo) {
         border-bottom: 1px solid #f1f5f9;
         font-size: 0.9rem;
     }
+    .product-search-box {
+        position: relative;
+    }
+    .product-results-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        z-index: 1060;
+        max-height: 300px;
+        overflow-y: auto;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+    }
+    .product-search-item {
+        padding: 10px 14px;
+        border-bottom: 1px solid #f1f5f9;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .product-search-item:hover, .product-search-item.active {
+        background: #fee2e2;
+        border-left: 4px solid #dc2626;
+    }
 </style>
 
 <!-- Top Title Bar -->
@@ -398,7 +375,7 @@ if ($db_connected && $pdo) {
         </div>
         <div>
             <h4 class="fw-bold mb-0 text-dark">Customer Sales Return</h4>
-            <p class="text-muted small mb-0">Record returned medicines against sales invoice, restock warehouse & issue credit</p>
+            <p class="text-muted small mb-0">Direct product return: Search medicine, enter quantity &amp; rate, update inventory &amp; customer balance</p>
         </div>
     </div>
     <div class="d-flex gap-2">
@@ -413,7 +390,7 @@ if ($db_connected && $pdo) {
     <div class="alert alert-<?= $msg_type ?> alert-dismissible fade show border-0 shadow-sm rounded-3 d-flex align-items-center mb-4" role="alert">
         <i class="fa-solid <?= $msg_type === 'success' ? 'fa-check-circle' : 'fa-exclamation-triangle' ?> fs-5 me-2"></i>
         <div class="fw-medium"><?= $message ?></div>
-        <button type="button" class="close ml-auto" data-dismiss="alert" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+        <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
     </div>
 <?php endif; ?>
 
@@ -421,230 +398,151 @@ if ($db_connected && $pdo) {
 <form action="" method="POST" id="returnForm">
     <div class="return-card p-4 p-md-5 mb-4">
 
+        <!-- Step 1: Customer Selection -->
         <div class="mb-4 pb-3 border-bottom">
-            <div class="section-tag"><i class="fa-solid fa-file-invoice"></i> Step 1: Select Sales Invoice</div>
+            <div class="section-tag"><i class="fa-solid fa-user"></i> Step 1: Customer Details</div>
             
             <div class="row g-3">
-                <div class="col-md-5">
-                    <label class="form-label small fw-bold text-muted mb-1">Select Sales Invoice <span class="text-danger">*</span></label>
-                    <select name="invoice_id" id="invoiceSelect" class="form-select" onchange="loadInvoiceForReturn(this.value)" required>
-                        <option value="">-- Choose Sales Invoice --</option>
-                        <?php foreach ($invoices_list as $inv): 
-                            $s_qty = (int)($inv['total_sold_qty'] ?? 0);
-                            $r_qty = (int)($inv['total_ret_qty'] ?? 0);
-                            $is_fully = ($s_qty > 0 && $r_qty >= $s_qty);
-                            $is_part  = ($r_qty > 0 && $r_qty < $s_qty);
-                            $badge_txt = $is_fully ? ' — [FULLY RETURNED (Pura Return Ho Chuka)]' : ($is_part ? ' — [Partially Returned (' . ($s_qty - $r_qty) . ' remaining)]' : '');
+                <!-- Customer Selection -->
+                <div class="col-md-6">
+                    <label class="form-label small fw-bold text-muted mb-1">Select Customer / Pharmacy <span class="text-danger">*</span></label>
+                    <select name="customer_id" id="customerSelect" class="form-select fw-semibold" onchange="handleCustomerChange(this)" required>
+                        <option value="">-- Choose Customer --</option>
+                        <?php foreach ($customers_list as $cust): 
+                            $c_disp = !empty($cust['shop_name']) ? ($cust['shop_name'] . ' (' . $cust['name'] . ')') : $cust['name'];
                         ?>
-                            <option value="<?= $inv['id'] ?>" <?= ($selected_invoice_id == $inv['id']) ? 'selected' : '' ?> style="<?= $is_fully ? 'color:#94a3b8;background:#f8fafc;' : '' ?>">
-                                <?= htmlspecialchars($inv['invoice_no']) ?> - <?= htmlspecialchars($inv['customer_name']) ?> (Rs. <?= number_format($inv['grand_total'], 2) ?>)<?= $badge_txt ?>
+                            <option value="<?= $cust['id'] ?>" data-balance="<?= floatval($cust['current_balance']) ?>" data-area="<?= htmlspecialchars($cust['area'] ?? '') ?>">
+                                <?= htmlspecialchars($c_disp) ?> &mdash; Bal: Rs. <?= number_format($cust['current_balance'], 2) ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
+                    <input type="hidden" name="customer_name" id="customerNameHidden" value="">
                 </div>
 
-                <div class="col-md-4">
+                <!-- Return Voucher Number -->
+                <div class="col-md-3">
                     <label class="form-label small fw-bold text-muted mb-1">Return Voucher Number</label>
                     <input type="text" name="return_no" class="form-control font-monospace fw-bold bg-light text-danger" value="<?= htmlspecialchars($auto_return_no) ?>" readonly>
                 </div>
 
+                <!-- Return Date -->
                 <div class="col-md-3">
                     <label class="form-label small fw-bold text-muted mb-1">Return Date</label>
                     <input type="date" name="return_date" class="form-control" value="<?= date('Y-m-d') ?>" required>
                 </div>
             </div>
 
-            <?php if ($selected_invoice): ?>
-                <div class="alert alert-info border-0 rounded-3 mt-3 d-flex justify-content-between align-items-center mb-0">
-                    <div>
-                        <strong class="fs-6"><?= htmlspecialchars($selected_invoice['customer_name']) ?></strong>
-                        <span class="text-muted ms-2">(Invoice Date: <?= date('d M Y', strtotime($selected_invoice['invoice_date'])) ?>)</span>
-                    </div>
-                    <div>
-                        <span>Billed Total: <strong>Rs. <?= number_format($selected_invoice['grand_total'], 2) ?></strong></span>
-                    </div>
+            <!-- Customer Info Badge -->
+            <div id="customerInfoBadge" class="mt-3 p-2 px-3 rounded-3 bg-light border d-flex justify-content-between align-items-center d-none">
+                <div>
+                    <i class="fa-solid fa-store text-danger me-2"></i>
+                    <span class="fw-bold text-dark" id="dispCustomerShop"></span>
+                    <span class="text-muted small ms-2" id="dispCustomerArea"></span>
                 </div>
-                <input type="hidden" name="customer_name" value="<?= htmlspecialchars($selected_invoice['customer_name']) ?>">
-            <?php endif; ?>
+                <div>
+                    <span class="text-muted small">Current Balance:</span>
+                    <strong class="text-danger font-monospace fs-6 ms-1" id="dispCustomerBal">Rs. 0.00</strong>
+                </div>
+            </div>
         </div>
 
-        <!-- Step 2: Returned Products Table -->
+        <!-- Step 2: Product Search & Return Items Table -->
         <div class="mb-4">
-            <div class="section-tag"><i class="fa-solid fa-pills"></i> Step 2: Invoiced Products to Return</div>
+            <div class="section-tag"><i class="fa-solid fa-pills"></i> Step 2: Select Medicines to Return</div>
 
-            <?php if (empty($selected_items)): ?>
-                <div class="p-5 text-center border rounded-3 bg-light text-muted">
-                    <i class="fa-solid fa-hand-pointer fs-2 mb-2 text-secondary d-block"></i>
-                    Please <strong>select a Sales Invoice</strong> above to load its medicines.
-                </div>
-            <?php elseif ($total_available_to_return <= 0): ?>
-                <div class="alert alert-warning border-warning shadow-sm rounded-3 p-4 mb-3">
-                    <div class="d-flex align-items-start gap-3">
-                        <i class="fa-solid fa-triangle-exclamation text-warning fs-2 mt-1"></i>
-                        <div class="flex-grow-1">
-                            <h5 class="fw-bold mb-1 text-dark">Is Invoice ke tamam items pehle hi mukammal tor par return ho chuke hain! (Fully Returned)</h5>
-                            <p class="text-muted mb-2">
-                                Total Sold: <strong class="text-dark"><?= $total_inv_sold ?> units</strong> &middot; 
-                                Total Already Returned: <strong class="text-danger"><?= $total_inv_ret ?> units</strong>. 
-                                Is invoice me mazeed return karne ke liye koi quantity baqi nahi hai.
-                            </p>
-                            <?php if (!empty($existing_invoice_returns)): ?>
-                                <div class="p-3 bg-white rounded border mt-2">
-                                    <strong class="text-dark d-block mb-1"><i class="fa-solid fa-file-invoice text-danger me-1"></i> Pehle se darj shuda Return Vouchers:</strong>
-                                    <div class="d-flex flex-wrap gap-2">
-                                        <?php foreach ($existing_invoice_returns as $eir): ?>
-                                            <a href="print_return.php?id=<?= $eir['id'] ?>" target="_blank" class="btn btn-sm btn-outline-danger font-monospace">
-                                                <i class="fa-solid fa-print me-1"></i><?= htmlspecialchars($eir['return_no']) ?> &mdash; Rs. <?= number_format($eir['total_amount'], 2) ?> (<?= date('d M Y', strtotime($eir['return_date'])) ?>)
-                                            </a>
-                                        <?php endforeach; ?>
-                                    </div>
-                                </div>
-                            <?php endif; ?>
-                            <div class="mt-3">
-                                <a href="sale_return.php" class="btn btn-outline-secondary btn-sm"><i class="fa-solid fa-arrow-left me-1"></i> Dusri Invoice Select Karein</a>
-                                <a href="sales.php" class="btn btn-outline-primary btn-sm ms-2"><i class="fa-solid fa-list me-1"></i> View All Sales</a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            <?php else: ?>
-                <div class="d-flex justify-content-between align-items-center mb-2 px-1">
-                    <span class="text-muted small">Return ke liye available medicines: <strong class="text-success"><?= $total_available_to_return ?> units</strong></span>
-                    <button type="button" class="btn btn-sm btn-outline-danger fw-bold" onclick="setAllRowsMax()">
-                        <i class="fa-solid fa-check-double me-1"></i> Return Full Invoice (Tamam Return Karein)
+            <!-- Live Product Search Bar -->
+            <div class="product-search-box mb-3">
+                <label class="form-label small fw-bold text-muted mb-1">Search Product / Medicine by Alphabet or Name <span class="text-danger">*</span></label>
+                <div class="input-group input-group-lg shadow-sm rounded-3 overflow-hidden">
+                    <span class="input-group-text bg-white border-end-0 text-danger"><i class="fa-solid fa-search"></i></span>
+                    <input type="text" id="directProductSearch" class="form-control border-start-0 ps-0 fs-6" placeholder="Medicine ka alphabet ya naam type karein (e.g. Panadol, Augmentin, Clobevate)..." autocomplete="off">
+                    <button type="button" class="btn btn-danger px-4 fw-bold" onclick="focusProductSearch()">
+                        <i class="fa-solid fa-magnifying-glass me-1"></i> Search
                     </button>
                 </div>
-                <div class="table-responsive border rounded-3 overflow-hidden shadow-sm mb-3">
-                    <table class="table table-return mb-0">
-                        <thead>
-                            <tr>
-                                <th style="width: 45px;" class="text-center">#</th>
-                                <th>Medicine / Product Name</th>
-                                <th style="width: 110px;" class="text-center">Sold Qty</th>
-                                <th style="width: 180px;" class="text-center">Return Qty <span class="text-danger">*</span></th>
-                                <th style="width: 140px;" class="text-end">Refund Rate</th>
-                                <th style="width: 180px;">Condition</th>
-                                <th style="width: 140px;" class="text-end">Refund Amount</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php
-                            $ret_pool = $already_returned;
-                            foreach ($selected_items as $idx => $it):
-                                $pid = intval($it['product_id']);
-                                $sold_q = intval($it['quantity']);
-                                $tp = $sold_q > 0 ? round(floatval($it['total_price']) / $sold_q, 2) : 0.0;
-                                $already_this = $ret_pool[$pid] ?? 0;
-                                $consume = min($sold_q, $already_this);
-                                $returnable = max(0, $sold_q - $consume);
-                                $ret_pool[$pid] = max(0, $already_this - $consume);
-                            ?>
-                                <tr>
-                                    <td class="text-center text-muted fw-bold"><?= $idx + 1 ?></td>
-                                    <td>
-                                        <strong class="text-dark"><?= htmlspecialchars($it['item_name']) ?></strong>
-                                        <input type="hidden" name="items[<?= $idx ?>][product_id]" value="<?= $it['product_id'] ?>">
-                                        <input type="hidden" name="items[<?= $idx ?>][item_name]" value="<?= htmlspecialchars($it['item_name']) ?>">
-                                        <input type="hidden" name="items[<?= $idx ?>][unit_price]" id="price_<?= $idx ?>" value="<?= $tp ?>">
-                                        <input type="hidden" name="items[<?= $idx ?>][max_qty]" value="<?= $returnable ?>">
-                                    </td>
-                                    <td class="text-center fw-bold text-secondary">
-                                        <?= $sold_q ?>
-                                        <?php if ($consume > 0): ?>
-                                            <small class="d-block text-danger font-weight-normal" style="font-size:10px;">-<?= $consume ?> returned</small>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td>
-                                        <?php if ($returnable > 0): ?>
-                                            <div class="input-group input-group-sm justify-content-center" style="max-width: 165px; margin: 0 auto;">
-                                                <button type="button" class="btn btn-outline-secondary px-2" onclick="adjustQty(<?= $idx ?>, -1, <?= $returnable ?>)" title="Decrease">-</button>
-                                                <input type="number" 
-                                                       name="items[<?= $idx ?>][quantity]" 
-                                                       id="qty_<?= $idx ?>" 
-                                                       class="form-control form-control-sm text-center fw-bold text-danger ret-qty-input" 
-                                                       min="0" 
-                                                       max="<?= $returnable ?>" 
-                                                       value="0" 
-                                                       onfocus="if(this.value==='0') this.value='';" 
-                                                       onblur="if(this.value==='') { this.value='0'; calculateReturnRow(<?= $idx ?>, <?= $returnable ?>); }"
-                                                       oninput="calculateReturnRow(<?= $idx ?>, <?= $returnable ?>)">
-                                                <button type="button" class="btn btn-outline-secondary px-2" onclick="adjustQty(<?= $idx ?>, 1, <?= $returnable ?>)" title="Increase">+</button>
-                                                <button type="button" class="btn btn-danger px-2 fw-bold" onclick="setRowMax(<?= $idx ?>, <?= $returnable ?>)" title="Return All Available">All</button>
-                                            </div>
-                                            <small class="text-muted d-block text-center mt-1" style="font-size: 10px;">Available: <strong><?= $returnable ?></strong></small>
-                                        <?php else: ?>
-                                            <input type="hidden" name="items[<?= $idx ?>][quantity]" value="0">
-                                            <span class="badge bg-light text-muted border">fully returned</span>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td class="text-end font-monospace">Rs. <?= number_format($tp, 2) ?></td>
-                                    <td>
-                                        <select name="items[<?= $idx ?>][condition]" class="form-select form-select-sm">
-                                            <option value="Good / Resalable">Good (Restock in Store)</option>
-                                            <option value="Damaged / Expiry Claim">Damaged / Expiry (Discard)</option>
-                                        </select>
-                                    </td>
-                                    <td class="text-end font-monospace fw-bold text-dark">
-                                        <span id="rowTotal_<?= $idx ?>">Rs. 0.00</span>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                <!-- Live Search Results Dropdown -->
+                <div id="productResultsDropdown" class="product-results-dropdown d-none"></div>
+            </div>
+
+            <!-- Direct Return Table -->
+            <div class="table-responsive border rounded-3 overflow-hidden shadow-sm mb-3">
+                <table class="table table-return mb-0" id="directReturnTable">
+                    <thead>
+                        <tr>
+                            <th style="width: 45px;" class="text-center">#</th>
+                            <th>Medicine / Product Name</th>
+                            <th style="width: 130px;" class="text-center">In Store Stock</th>
+                            <th style="width: 160px;" class="text-center">Return Qty <span class="text-danger">*</span></th>
+                            <th style="width: 160px;" class="text-end">Return Rate (Rs.) <span class="text-danger">*</span></th>
+                            <th style="width: 220px;">Condition</th>
+                            <th style="width: 150px;" class="text-end">Refund Amount</th>
+                            <th style="width: 50px;" class="text-center">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="directReturnTbody">
+                        <!-- Rows added dynamically via JS -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Empty State Banner -->
+            <div id="directEmptyState" class="p-5 text-center border rounded-3 bg-light text-muted mb-3">
+                <i class="fa-solid fa-pills fs-1 mb-2 text-secondary d-block"></i>
+                Abhi tak koi medicine add nahi ki gayi.<br>
+                Upar diye gaye <strong>search box me alphabet ya naam type karein</strong> aur list se select karein.
+            </div>
+
+            <!-- Step 3: Refund Settlement & Remarks -->
+            <div class="row g-4 pt-3 border-top justify-content-between align-items-start">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <label class="form-label small fw-bold text-muted mb-1">Return Reason / Remarks</label>
+                        <textarea name="reason" class="form-control" rows="3" placeholder="Customer excess order, expired stock claim, packaging damaged etc..."></textarea>
+                    </div>
                 </div>
 
-                <!-- Step 3: Refund Settlement & Reason -->
-                <div class="row g-4 pt-3 border-top justify-content-between align-items-start">
-                    <div class="col-md-6">
+                <div class="col-md-5">
+                    <div class="p-3 border rounded bg-light">
                         <div class="mb-3">
-                            <label class="form-label small fw-bold text-muted mb-1">Return Reason / Remarks</label>
-                            <textarea name="reason" class="form-control" rows="3" placeholder="Customer excess order, expired stock claim, packaging damaged etc..."></textarea>
+                            <label class="form-label small fw-bold text-muted mb-1">Refund Method</label>
+                            <select name="refund_type" id="refundTypeSelect" class="form-select fw-semibold" onchange="toggleAccountDropdown()">
+                                <option value="Deduct Balance">Adjust / Deduct Customer Balance</option>
+                                <option value="Cash Refund">Cash Refund (Pay from Cash Account)</option>
+                                <option value="Bank Refund">Bank Transfer Refund</option>
+                            </select>
                         </div>
-                    </div>
 
-                    <div class="col-md-5">
-                        <div class="p-3 border rounded bg-light">
-                            <div class="mb-3">
-                                <label class="form-label small fw-bold text-muted mb-1">Refund Method</label>
-                                <select name="refund_type" id="refundTypeSelect" class="form-select fw-semibold" onchange="toggleAccountDropdown()">
-                                    <option value="Deduct Balance">Adjust / Deduct Customer Balance</option>
-                                    <option value="Cash Refund">Cash Refund (Pay from Cash Account)</option>
-                                    <option value="Bank Refund">Bank Transfer Refund</option>
-                                </select>
-                            </div>
+                        <div class="mb-3 d-none" id="cashAccountBox">
+                            <label class="form-label small fw-bold text-muted mb-1">Cash Account</label>
+                            <select name="cash_account_id" class="form-select">
+                                <?php foreach ($cash_accounts as $ca): ?>
+                                    <option value="<?= $ca['id'] ?>"><?= htmlspecialchars($ca['account_name']) ?> (Bal: Rs. <?= number_format($ca['balance'], 2) ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
 
-                            <div class="mb-3 d-none" id="cashAccountBox">
-                                <label class="form-label small fw-bold text-muted mb-1">Cash Account</label>
-                                <select name="cash_account_id" class="form-select">
-                                    <?php foreach ($cash_accounts as $ca): ?>
-                                        <option value="<?= $ca['id'] ?>"><?= htmlspecialchars($ca['account_name']) ?> (Bal: Rs. <?= number_format($ca['balance'], 2) ?>)</option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
+                        <div class="mb-3 d-none" id="bankAccountBox">
+                            <label class="form-label small fw-bold text-muted mb-1">Bank Account</label>
+                            <select name="bank_account_id" class="form-select">
+                                <?php foreach ($bank_accounts as $ba): ?>
+                                    <option value="<?= $ba['id'] ?>"><?= htmlspecialchars($ba['bank_name']) ?> (<?= htmlspecialchars($ba['account_title']) ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
 
-                            <div class="mb-3 d-none" id="bankAccountBox">
-                                <label class="form-label small fw-bold text-muted mb-1">Bank Account</label>
-                                <select name="bank_account_id" class="form-select">
-                                    <?php foreach ($bank_accounts as $ba): ?>
-                                        <option value="<?= $ba['id'] ?>"><?= htmlspecialchars($ba['bank_name']) ?> (<?= htmlspecialchars($ba['account_title']) ?>)</option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top">
+                            <span class="fw-bold text-dark fs-6">Total Return Refund:</span>
+                            <span class="fw-bold text-danger fs-5 font-monospace" id="grandRefundTotalDisplay">Rs. 0.00</span>
+                        </div>
 
-                            <div class="d-flex justify-content-between align-items-center pt-2 border-top">
-                                <span class="fw-bold text-dark fs-6">Total Return Refund:</span>
-                                <span class="fw-bold text-danger fs-5 font-monospace" id="grandRefundTotalDisplay">Rs. 0.00</span>
-                            </div>
-
-                            <div class="mt-4">
-                                <button type="submit" name="save_return" id="saveReturnBtn" class="btn btn-danger w-100 fw-bold py-2 shadow-sm text-uppercase">
-                                    <i class="fa-solid fa-check me-1"></i> Confirm &amp; Save Return
-                                </button>
-                            </div>
+                        <div class="mt-4">
+                            <button type="submit" name="save_return" id="saveReturnBtn" class="btn btn-danger w-100 fw-bold py-2 shadow-sm text-uppercase">
+                                <i class="fa-solid fa-check me-1"></i> Confirm &amp; Save Return
+                            </button>
                         </div>
                     </div>
                 </div>
-            <?php endif; ?>
+            </div>
 
         </div>
 
@@ -661,26 +559,38 @@ if ($db_connected && $pdo) {
                     <tr class="table-light">
                         <th>Return #</th>
                         <th>Date</th>
+                        <th>Customer</th>
                         <th>Return Reason</th>
                         <th>Refund Method</th>
                         <th class="text-center">Items</th>
                         <th class="text-end">Refund Amount</th>
-                        <th class="text-center">Action</th>
+                        <th class="text-center" style="width: 140px;">Action</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <?php foreach ($recent_returns as $rr): ?>
+                    <?php foreach ($recent_returns as $rr): 
+                        $c_title = !empty($rr['cust_shop']) ? ($rr['cust_shop'] . ' (' . $rr['cust_name'] . ')') : ($rr['cust_name'] ?? 'Direct Customer');
+                    ?>
                         <tr>
                             <td><strong class="text-danger font-monospace"><?= htmlspecialchars($rr['return_no']) ?></strong></td>
                             <td><?= date('d M Y', strtotime($rr['return_date'])) ?></td>
+                            <td><span class="fw-semibold text-dark"><?= htmlspecialchars($c_title) ?></span></td>
                             <td><?= htmlspecialchars($rr['reason'] ?: 'Customer Return') ?></td>
                             <td><span class="badge bg-light text-dark border"><?= htmlspecialchars($rr['refund_type']) ?></span></td>
                             <td class="text-center"><?= intval($rr['total_items_count']) ?> items</td>
                             <td class="text-end font-monospace fw-bold text-dark">Rs. <?= number_format($rr['total_amount'], 2) ?></td>
                             <td class="text-center">
-                                <a href="print_return.php?id=<?= $rr['id'] ?>" target="_blank" class="btn btn-outline-primary btn-sm px-2 py-1" title="Print Return Voucher">
-                                    <i class="fa-solid fa-print"></i>
-                                </a>
+                                <div class="d-inline-flex align-items-center gap-1">
+                                    <a href="print_return.php?id=<?= $rr['id'] ?>" target="_blank" class="btn btn-outline-primary btn-sm px-2 py-1" title="Print Return Voucher">
+                                        <i class="fa-solid fa-print"></i>
+                                    </a>
+                                    <a href="edit_sale_return.php?id=<?= $rr['id'] ?>" class="btn btn-outline-warning btn-sm px-2 py-1 text-dark" title="Edit Sale Return">
+                                        <i class="fa-solid fa-edit"></i>
+                                    </a>
+                                    <a href="sale_return.php?action=delete&id=<?= $rr['id'] ?>" class="btn btn-outline-danger btn-sm px-2 py-1" title="Delete Sale Return" onclick="return confirm('Kya aap waqai is Sale Return #<?= htmlspecialchars($rr['return_no']) ?> ko delete karna chahte hain? Stock aur accounts revert ho jayenge.');">
+                                        <i class="fa-solid fa-trash"></i>
+                                    </a>
+                                </div>
                             </td>
                         </tr>
                     <?php endforeach; ?>
@@ -691,71 +601,172 @@ if ($db_connected && $pdo) {
 <?php endif; ?>
 
 <script>
-    function loadInvoiceForReturn(invId) {
-        if (invId) {
-            window.location.href = 'sale_return.php?invoice_id=' + invId;
+    let directRowCounter = 0;
+
+    function handleCustomerChange(selectEl) {
+        const selOption = selectEl.options[selectEl.selectedIndex];
+        const badge = document.getElementById('customerInfoBadge');
+        const hiddenName = document.getElementById('customerNameHidden');
+
+        if (selectEl.value) {
+            const bal = parseFloat(selOption.getAttribute('data-balance')) || 0;
+            const area = selOption.getAttribute('data-area') || '';
+            const text = selOption.text.split('—')[0].trim();
+
+            document.getElementById('dispCustomerShop').textContent = text;
+            document.getElementById('dispCustomerArea').textContent = area ? ('(' + area + ')') : '';
+            document.getElementById('dispCustomerBal').textContent = 'Rs. ' + bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            if (hiddenName) hiddenName.value = text;
+            if (badge) badge.classList.remove('d-none');
+        } else {
+            if (badge) badge.classList.add('d-none');
+            if (hiddenName) hiddenName.value = '';
         }
     }
 
-    function calculateReturnRow(idx, maxQty) {
-        const qtyInput = document.getElementById('qty_' + idx);
-        if (!qtyInput) return;
-        let qty = parseInt(qtyInput.value) || 0;
+    // Add selected medicine to return table
+    function addDirectProduct(prod) {
+        const tbody = document.getElementById('directReturnTbody');
+        const emptyState = document.getElementById('directEmptyState');
+        if (!tbody) return;
 
-        if (qty > maxQty) {
-            alert('⚠️ Return quantity cannot exceed available quantity (' + maxQty + ')!');
-            qty = maxQty;
-            qtyInput.value = maxQty;
-        } else if (qty < 0) {
-            qty = 0;
-            qtyInput.value = 0;
+        // Check if product is already in the table
+        const existingInput = document.querySelector(`.direct-pid-input[value="${prod.id}"]`);
+        if (existingInput) {
+            const existingRow = existingInput.closest('tr');
+            const qtyField = existingRow.querySelector('.direct-qty-input');
+            if (qtyField) {
+                qtyField.value = (parseInt(qtyField.value) || 0) + 1;
+                qtyField.focus();
+                calculateDirectRow(qtyField);
+            }
+            hideDropdown();
+            return;
         }
 
-        const price = parseFloat(document.getElementById('price_' + idx).value) || 0;
+        directRowCounter++;
+        const rIndex = directRowCounter;
+        const rate = parseFloat(prod.trade_price) || 0;
+        const stock = parseInt(prod.current_stock) || 0;
+
+        const tr = document.createElement('tr');
+        tr.id = 'direct_row_' + rIndex;
+        tr.innerHTML = `
+            <td class="text-center text-muted fw-bold row-index">${rIndex}</td>
+            <td>
+                <strong class="text-dark d-block">${escapeHtml(prod.name)}</strong>
+                <small class="text-muted">${prod.product_code || ''} ${prod.generic_name ? '&bull; ' + escapeHtml(prod.generic_name) : ''}</small>
+                <input type="hidden" name="items[${rIndex}][product_id]" class="direct-pid-input" value="${prod.id}">
+                <input type="hidden" name="items[${rIndex}][item_name]" value="${escapeHtml(prod.name)}">
+            </td>
+            <td class="text-center">
+                <span class="badge bg-light text-secondary border font-monospace">${stock} units</span>
+            </td>
+            <td>
+                <input type="number" 
+                       name="items[${rIndex}][quantity]" 
+                       class="form-control form-control-sm text-center fw-bold text-danger direct-qty-input" 
+                       value="1" 
+                       min="1" 
+                       step="1"
+                       oninput="calculateDirectRow(this)">
+            </td>
+            <td>
+                <div class="input-group input-group-sm">
+                    <span class="input-group-text bg-light text-muted">Rs.</span>
+                    <input type="number" 
+                           name="items[${rIndex}][unit_price]" 
+                           class="form-control form-control-sm text-end fw-semibold direct-price-input" 
+                           value="${rate.toFixed(2)}" 
+                           min="0" 
+                           step="0.01" 
+                           oninput="calculateDirectRow(this)">
+                </div>
+            </td>
+            <td>
+                <select name="items[${rIndex}][condition]" class="form-select form-select-sm">
+                    <option value="Good / Resalable">Good (Restock in Store)</option>
+                    <option value="Damaged / Expiry Claim">Damaged / Expiry (Discard)</option>
+                </select>
+            </td>
+            <td class="text-end font-monospace fw-bold text-dark direct-row-total">
+                Rs. ${rate.toFixed(2)}
+            </td>
+            <td class="text-center">
+                <button type="button" class="btn btn-outline-danger btn-sm px-2 py-1" onclick="removeDirectRow(this)" title="Remove item">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </td>
+        `;
+
+        tbody.appendChild(tr);
+        if (emptyState) emptyState.classList.add('d-none');
+
+        updateRowIndices();
+        recalculateGrandRefund();
+        hideDropdown();
+
+        // Automatically focus on quantity field
+        const addedQty = tr.querySelector('.direct-qty-input');
+        if (addedQty) {
+            addedQty.focus();
+            addedQty.select();
+        }
+    }
+
+    function calculateDirectRow(el) {
+        const tr = el.closest('tr');
+        if (!tr) return;
+
+        const qtyInput = tr.querySelector('.direct-qty-input');
+        const priceInput = tr.querySelector('.direct-price-input');
+        const totalEl = tr.querySelector('.direct-row-total');
+
+        const qty = parseInt(qtyInput.value) || 0;
+        const price = parseFloat(priceInput.value) || 0;
         const total = qty * price;
-        const rowTotalEl = document.getElementById('rowTotal_' + idx);
-        if (rowTotalEl) {
-            rowTotalEl.textContent = 'Rs. ' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        if (totalEl) {
+            totalEl.textContent = 'Rs. ' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
 
         recalculateGrandRefund();
     }
 
-    function adjustQty(idx, delta, maxQty) {
-        const qtyInput = document.getElementById('qty_' + idx);
-        if (!qtyInput) return;
-        let current = parseInt(qtyInput.value) || 0;
-        let updated = current + delta;
-        if (updated < 0) updated = 0;
-        if (updated > maxQty) updated = maxQty;
-        qtyInput.value = updated;
-        calculateReturnRow(idx, maxQty);
+    function removeDirectRow(btn) {
+        const tr = btn.closest('tr');
+        if (tr) {
+            tr.remove();
+            updateRowIndices();
+            recalculateGrandRefund();
+
+            const tbody = document.getElementById('directReturnTbody');
+            const emptyState = document.getElementById('directEmptyState');
+            if (tbody && tbody.children.length === 0 && emptyState) {
+                emptyState.classList.remove('d-none');
+            }
+        }
     }
 
-    function setRowMax(idx, maxQty) {
-        const qtyInput = document.getElementById('qty_' + idx);
-        if (!qtyInput) return;
-        qtyInput.value = maxQty;
-        calculateReturnRow(idx, maxQty);
-    }
-
-    function setAllRowsMax() {
-        document.querySelectorAll('.ret-qty-input').forEach(input => {
-            const idx = input.id.replace('qty_', '');
-            const max = parseInt(input.getAttribute('max')) || 0;
-            input.value = max;
-            calculateReturnRow(idx, max);
+    function updateRowIndices() {
+        document.querySelectorAll('#directReturnTbody tr').forEach((tr, index) => {
+            const idxEl = tr.querySelector('.row-index');
+            if (idxEl) idxEl.textContent = index + 1;
         });
     }
 
     function recalculateGrandRefund() {
         let grand = 0;
-        document.querySelectorAll('.ret-qty-input').forEach(input => {
-            const idx = input.id.replace('qty_', '');
-            const q = parseInt(input.value) || 0;
-            const p = parseFloat(document.getElementById('price_' + idx).value) || 0;
-            grand += (q * p);
+        document.querySelectorAll('#directReturnTbody tr').forEach(tr => {
+            const qtyInput = tr.querySelector('.direct-qty-input');
+            const priceInput = tr.querySelector('.direct-price-input');
+            if (qtyInput && priceInput) {
+                const q = parseInt(qtyInput.value) || 0;
+                const p = parseFloat(priceInput.value) || 0;
+                grand += (q * p);
+            }
         });
+
         const el = document.getElementById('grandRefundTotalDisplay');
         if (el) el.textContent = 'Rs. ' + grand.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
@@ -774,13 +785,115 @@ if ($db_connected && $pdo) {
         if (type === 'Bank Refund' && bBox) bBox.classList.remove('d-none');
     }
 
+    function focusProductSearch() {
+        const searchInput = document.getElementById('directProductSearch');
+        if (searchInput) {
+            searchInput.focus();
+            fetchProductResults(searchInput.value.trim());
+        }
+    }
+
+    function hideDropdown() {
+        const dd = document.getElementById('productResultsDropdown');
+        if (dd) dd.classList.add('d-none');
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    let searchTimeout = null;
+    function fetchProductResults(query) {
+        const dd = document.getElementById('productResultsDropdown');
+        if (!dd) return;
+
+        fetch('sale_return.php?action=search_product&q=' + encodeURIComponent(query))
+            .then(res => res.json())
+            .then(data => {
+                dd.innerHTML = '';
+                if (!data || data.length === 0) {
+                    dd.innerHTML = '<div class="p-3 text-muted text-center small"><i class="fa-solid fa-circle-exclamation me-1"></i> Koi medicine nahi mili.</div>';
+                    dd.classList.remove('d-none');
+                    return;
+                }
+
+                data.forEach(p => {
+                    const item = document.createElement('div');
+                    item.className = 'product-search-item d-flex justify-content-between align-items-center';
+                    item.innerHTML = `
+                        <div>
+                            <strong class="text-dark d-block">${escapeHtml(p.name)}</strong>
+                            <small class="text-muted">${p.product_code || ''} ${p.generic_name ? '&bull; ' + escapeHtml(p.generic_name) : ''} ${p.company_name ? '&bull; ' + escapeHtml(p.company_name) : ''}</small>
+                        </div>
+                        <div class="text-end">
+                            <span class="fw-bold text-danger font-monospace d-block">Rs. ${parseFloat(p.trade_price).toFixed(2)}</span>
+                            <span class="badge bg-light text-secondary border font-monospace">Stock: ${p.current_stock || 0}</span>
+                        </div>
+                    `;
+                    item.addEventListener('click', () => {
+                        addDirectProduct(p);
+                        const sInput = document.getElementById('directProductSearch');
+                        if (sInput) sInput.value = '';
+                    });
+                    dd.appendChild(item);
+                });
+
+                dd.classList.remove('d-none');
+            })
+            .catch(err => {
+                console.error(err);
+            });
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.getElementById('directProductSearch');
+        const dropdown = document.getElementById('productResultsDropdown');
+
+        if (searchInput) {
+            searchInput.addEventListener('input', function() {
+                clearTimeout(searchTimeout);
+                const q = this.value.trim();
+                searchTimeout = setTimeout(() => {
+                    fetchProductResults(q);
+                }, 150);
+            });
+
+            searchInput.addEventListener('focus', function() {
+                fetchProductResults(this.value.trim());
+            });
+        }
+
+        // Close dropdown when clicked outside
+        document.addEventListener('click', function(e) {
+            if (dropdown && !dropdown.contains(e.target) && e.target !== searchInput) {
+                hideDropdown();
+            }
+        });
+
+        // Form submit validation
         const returnForm = document.getElementById('returnForm');
         if (returnForm) {
             returnForm.addEventListener('submit', function(e) {
-                const qtyInputs = document.querySelectorAll('.ret-qty-input');
+                const customerSelect = document.getElementById('customerSelect');
+                if (!customerSelect || !customerSelect.value) {
+                    e.preventDefault();
+                    alert('⚠️ Barahe karam pehle Customer select karein!\n(Please select a customer for the return)');
+                    if (customerSelect) customerSelect.focus();
+                    return false;
+                }
+
+                const qtyInputs = document.querySelectorAll('.direct-qty-input');
                 if (qtyInputs.length === 0) {
-                    return; // No items loaded or fully returned
+                    e.preventDefault();
+                    alert('⚠️ Barahe karam kam az kam 1 medicine add karein!\n(Please search and add at least one medicine to return)');
+                    focusProductSearch();
+                    return false;
                 }
 
                 let totalReturnQty = 0;
@@ -790,8 +903,8 @@ if ($db_connected && $pdo) {
 
                 if (totalReturnQty <= 0) {
                     e.preventDefault();
-                    alert('⚠️ Barahe karam kam az kam 1 item ki return quantity 1 ya zyada darj karein!\n(Please enter a return quantity of 1 or more for at least one item.)');
-                    const firstInput = document.querySelector('.ret-qty-input');
+                    alert('⚠️ Barahe karam kam az kam 1 item ki return quantity 1 ya zyada darj karein!');
+                    const firstInput = document.querySelector('.direct-qty-input');
                     if (firstInput) {
                         firstInput.focus();
                         firstInput.select();

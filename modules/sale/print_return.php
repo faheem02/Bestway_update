@@ -55,11 +55,11 @@ $customer_route = $orig_invoice['route_name'] ?? '';
 
 if (empty($customer_display_name) && !empty($return['customer_id'])) {
     try {
-        $c_stmt = $pdo->prepare("SELECT full_name, pharmacy_name, area FROM customers WHERE id = ?");
+        $c_stmt = $pdo->prepare("SELECT name, shop_name, area FROM customers WHERE id = ?");
         $c_stmt->execute([$return['customer_id']]);
         $c_row = $c_stmt->fetch(PDO::FETCH_ASSOC);
         if ($c_row) {
-            $customer_display_name = !empty($c_row['pharmacy_name']) ? $c_row['pharmacy_name'] : $c_row['full_name'];
+            $customer_display_name = !empty($c_row['shop_name']) ? ($c_row['shop_name'] . ' (' . $c_row['name'] . ')') : $c_row['name'];
             if (empty($customer_route)) $customer_route = $c_row['area'] ?? '';
         }
     } catch (Exception $e) {}
@@ -255,7 +255,7 @@ $sign_src  = file_exists($sign_file) ? 'data:image/png;base64,' . base64_encode(
             <div class="col-6">
                 <div class="info-card h-100">
                     <div class="text-muted text-uppercase fw-bold" style="font-size: 10px;">Return Settlement Details</div>
-                    <div class="small mt-1">Against Invoice: <strong class="text-primary font-monospace"><?= htmlspecialchars($orig_invoice['invoice_no'] ?? ('INV-' . str_pad($target_inv_id, 4, '0', STR_PAD_LEFT))) ?></strong></div>
+                    <div class="small mt-1">Against Invoice: <strong class="text-primary font-monospace"><?= $target_inv_id > 0 ? htmlspecialchars($orig_invoice['invoice_no'] ?? ('INV-' . str_pad($target_inv_id, 4, '0', STR_PAD_LEFT))) : '<span class="text-secondary fw-normal">Direct Return (No Invoice)</span>' ?></strong></div>
                     <div class="small">Refund Type: <strong class="text-danger"><?= htmlspecialchars($return['refund_type']) ?></strong></div>
                     <div class="small">Reason: <strong><?= htmlspecialchars($return['reason'] ?: 'Customer Return') ?></strong></div>
                 </div>
