@@ -12,7 +12,6 @@ require_once __DIR__ . '/../../includes/header.php';
 $message = "";
 $msg_type = "";
 $edit_data = null;
-
 // Handle Delete Action
 if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id'])) {
     $del_id = intval($_GET['id']);
@@ -34,7 +33,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
         }
     }
 }
-
 // Handle Edit Fetch
 if (isset($_GET['edit']) && !empty($_GET['edit'])) {
     $edit_id = intval($_GET['edit']);
@@ -44,7 +42,6 @@ if (isset($_GET['edit']) && !empty($_GET['edit'])) {
         $edit_data = $stmt->fetch();
     }
 }
-
 // Handle Form Submission (Add or Update)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_category'])) {
     $category_id = !empty($_POST['category_id']) ? intval($_POST['category_id']) : null;
@@ -84,8 +81,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_category'])) {
         }
     }
 }
-
-
 // Fetch all categories
 $categories_list = [];
 if ($db_connected && $pdo) {
@@ -101,7 +96,6 @@ if ($db_connected && $pdo) {
     } catch (Exception $e) {}
 }
 ?>
-
 <style>
     .page-title-badge {
         width: 48px;
@@ -152,7 +146,6 @@ if ($db_connected && $pdo) {
         border-color: #dc2626;
     }
 </style>
-
 <!-- Top Title & Navigation -->
 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
     <div class="d-flex align-items-center gap-3">
@@ -173,7 +166,6 @@ if ($db_connected && $pdo) {
         </a>
     </div>
 </div>
-
 <!-- Alert Notifications -->
 <?php if (!empty($message)): ?>
     <div class="alert alert-<?= $msg_type ?> alert-dismissible fade show border-0 shadow-sm rounded-3 d-flex align-items-center mb-4" role="alert">
@@ -182,7 +174,6 @@ if ($db_connected && $pdo) {
         <button type="button" class="close ml-auto" data-dismiss="alert" aria-label="Close"><span aria-hidden="true">&times;</span></button>
     </div>
 <?php endif; ?>
-
 <div class="row g-4">
     <!-- Left: Add / Edit Category Form (5 Cols) -->
     <div class="col-lg-5">
@@ -310,5 +301,4 @@ if ($db_connected && $pdo) {
         </div>
     </div>
 </div>
-
 <?php require_once __DIR__ . '/../../includes/footer.php'; ?>

@@ -13,7 +13,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
                        COALESCE(NULLIF(p.retail_price, 0), NULLIF(p.trade_price, 0), (SELECT pi.trade_price FROM purchase_items pi WHERE pi.product_id = p.id AND pi.trade_price > 0 ORDER BY pi.id DESC LIMIT 1), p.purchase_price, 0) as sale_price,
                        p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, 
                        p.discount_percent,
-                       COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount,
+                       p.discount_percent as default_discount,
                        c.name as company_name, u.name as base_unit_name 
                 FROM products p 
                 LEFT JOIN companies c ON c.id = p.company_id 
@@ -188,7 +188,7 @@ if ($db_connected && $pdo) {
                 p.stock_unit, 
                 p.packs_per_box,
                 p.discount_percent,
-                COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount,
+                p.discount_percent as default_discount,
                 c.name as company_name,
                 u.name as base_unit_name
             FROM products p
@@ -363,7 +363,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
                 // Verify product and current stock directly from DB
                 $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price, purchase_price,
-                    COALESCE(NULLIF(discount_percent, 0), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = products.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount
+                    discount_percent as default_discount
                     FROM products WHERE id = ?");
                 $stmt_chk->execute([$pid]);
                 $prod_row = $stmt_chk->fetch(PDO::FETCH_ASSOC);
@@ -2467,5 +2467,4 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
     window.location.href = "print_invoice.php?id=<?= $saved_invoice_id ?>&type=<?= $saved_customer_invoice_type ?>";
 </script>
 <?php endif; ?>
-
 <?php require_once __DIR__ . '/../../includes/footer.php'; ?>

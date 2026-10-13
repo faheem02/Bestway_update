@@ -3,6 +3,70 @@
  * Bestway Distribution - Enterprise Product Catalog & Inventory List
  * Multi-Unit B2B Wholesale Inventory Management
  */
+require_once dirname(__DIR__, 2) . '/config/config.php';
+require_once dirname(__DIR__, 2) . '/config/database.php';
+require_once dirname(__DIR__, 2) . '/includes/functions.php';
+
+// Quick AJAX Endpoint for fetching all batches of a product
+if (isset($_GET['action']) && $_GET['action'] === 'get_batches' && !empty($_GET['id'])) {
+    if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'Unauthorized']);
+        exit;
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    $pid = intval($_GET['id']);
+    $batches = [];
+
+    if ($db_connected && $pdo) {
+        try {
+            $b_stmt = $pdo->prepare("
+                SELECT 
+                    id, 
+                    batch_no, 
+                    expiry_date, 
+                    manufacturing_date, 
+                    purchase_price, 
+                    trade_price, 
+                    retail_price, 
+                    initial_quantity, 
+                    current_stock, 
+                    status
+                FROM product_batches
+                WHERE product_id = ?
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id DESC
+            ");
+            $b_stmt->execute([$pid]);
+            $batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // If empty, check purchase_items as fallback
+            if (empty($batches)) {
+                $pi_stmt = $pdo->prepare("
+                    SELECT 
+                        pi.id, 
+                        pi.batch_no, 
+                        pi.expiry_date, 
+                        NULL as manufacturing_date,
+                        pi.purchase_price, 
+                        pi.trade_price, 
+                        pi.retail_price, 
+                        pi.quantity as initial_quantity, 
+                        pi.quantity as current_stock, 
+                        'From Purchase' as status
+                    FROM purchase_items pi
+                    WHERE pi.product_id = ? AND pi.batch_no IS NOT NULL AND pi.batch_no != ''
+                    ORDER BY pi.id DESC
+                ");
+                $pi_stmt->execute([$pid]);
+                $batches = $pi_stmt->fetchAll(PDO::FETCH_ASSOC);
+            }
+        } catch (Exception $e) {}
+    }
+
+    echo json_encode(['success' => true, 'batches' => $batches]);
+    exit;
+}
+
 $page_title = "Products";
 $compact_page_heading = true;
 require_once __DIR__ . '/../../includes/header.php';
@@ -108,25 +172,31 @@ if ($db_connected && $pdo) {
         $stmt = $pdo->prepare("
             SELECT 
                 p.*,
-                c.name as company_name,
+                COALESCE(c.name, (
+                    SELECT COALESCE(NULLIF(s.company_name, ''), s.name)
+                    FROM purchases pu
+                    JOIN suppliers s ON pu.supplier_id = s.id
+                    JOIN purchase_items pi ON pi.purchase_id = pu.id
+                    WHERE pi.product_id = p.id
+                    ORDER BY pu.id DESC LIMIT 1
+                )) as company_name,
                 cat.name as category_name,
                 u.name as unit_name,
                 u.short_name as unit_short,
-                pb.batch_no,
-                pb.expiry_date
+                COALESCE(
+                    (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
+                    (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
+                    (SELECT pi.batch_no FROM purchase_items pi WHERE pi.product_id = p.id AND pi.batch_no IS NOT NULL AND pi.batch_no != '' ORDER BY pi.id DESC LIMIT 1)
+                ) as batch_no,
+                COALESCE(
+                    (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
+                    (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
+                    (SELECT pi.expiry_date FROM purchase_items pi WHERE pi.product_id = p.id AND pi.expiry_date IS NOT NULL ORDER BY pi.id DESC LIMIT 1)
+                ) as expiry_date
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
             LEFT JOIN units u ON p.unit_id = u.id
-            LEFT JOIN (
-                SELECT pb1.product_id, pb1.batch_no, pb1.expiry_date
-                FROM product_batches pb1
-                INNER JOIN (
-                    SELECT product_id, MAX(id) as max_id
-                    FROM product_batches
-                    GROUP BY product_id
-                ) pb2 ON pb1.id = pb2.max_id
-            ) pb ON pb.product_id = p.id
             WHERE $where_sql
             ORDER BY p.id DESC
             LIMIT 300
@@ -535,9 +605,9 @@ if ($db_connected && $pdo) {
                             </td>
 
                             <td>
-                                <div class="fw-semibold text-dark"><?= htmlspecialchars($p['company_name'] ?? 'General') ?></div>
+                                <div class="fw-semibold text-dark"><?= htmlspecialchars(!empty($p['company_name']) ? $p['company_name'] : '—') ?></div>
                                 <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.72rem;">
-                                    <?= htmlspecialchars($p['category_name'] ?? 'Dosage') ?>
+                                    <?= htmlspecialchars(!empty($p['category_name']) ? $p['category_name'] : '—') ?>
                                 </span>
                             </td>
 
@@ -583,30 +653,37 @@ if ($db_connected && $pdo) {
                             <?php if ($can_manage_products): ?>
                             <td class="text-center action-col">
                                 <div class="d-flex align-items-center justify-content-center gap-1">
+                                    <?php
+                                        $prod_json = htmlspecialchars(json_encode([
+                                            "id" => $p["id"],
+                                            "code" => $p["product_code"],
+                                            "name" => $p["name"],
+                                            "company" => !empty($p["company_name"]) ? $p["company_name"] : "Not Assigned",
+                                            "category" => !empty($p["category_name"]) ? $p["category_name"] : "Not Assigned",
+                                            "batch" => !empty($p["batch_no"]) ? $p["batch_no"] : "—",
+                                            "expiry" => (!empty($p["expiry_date"]) && $p["expiry_date"] !== "0000-00-00") ? date("d-M-Y", strtotime($p["expiry_date"])) : "—",
+                                            "raw_expiry" => $p["expiry_date"] ?? "",
+                                            "stock_unit" => $p["stock_unit"] ?? "Pcs",
+                                            "cost" => $cost,
+                                            "tp" => $tp,
+                                            "disc" => floatval($p["discount_percent"] ?? 0),
+                                            "sale" => $sale,
+                                            "retail" => floatval($p["retail_price"] ?? 0),
+                                            "profit" => $profit_pack,
+                                            "stock" => $cur_stock,
+                                            "opening_stock" => floatval($p["opening_stock"] ?? 0),
+                                            "reorder" => $p["reorder_level"] ?? 10,
+                                            "location_rack" => $p["location_rack"] ?? "",
+                                            "barcode" => $p["barcode"] ?? "",
+                                            "status" => $p["status"] ?? "Active"
+                                        ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), ENT_QUOTES, "UTF-8");
+                                    ?>
                                     <!-- 1. View Product Details -->
                                     <button type="button" 
                                             class="action-btn btn-view" 
                                             title="View Product Details" 
-                                            onclick='showProductModal(<?= htmlspecialchars(json_encode([
-                                                "id" => $p["id"],
-                                                "code" => $p["product_code"],
-                                                "name" => $p["name"],
-                                                "company" => $p["company_name"] ?? "General Pharma",
-                                                "category" => $p["category_name"] ?? "General Dosage",
-                                                "batch" => $p["batch_no"] ?? "—",
-                                                "expiry" => !empty($p["expiry_date"]) ? date("d-M-Y", strtotime($p["expiry_date"])) : "—",
-                                                "stock_unit" => $p["stock_unit"] ?? "Pack",
-                                                "p_box" => $p_box,
-                                                "t_pack" => $t_pack,
-                                                "tot_tabs" => $tot_tabs,
-                                                "tp" => $tp,
-                                                "disc" => floatval($p["discount_percent"] ?? 0),
-                                                "sale" => $sale,
-                                                "stock" => $cur_stock,
-                                                "stock_boxes" => number_format($stock_boxes, 1),
-                                                "stock_tabs" => number_format($stock_tabs),
-                                                "reorder" => $p["reorder_level"] ?? 10
-                                            ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), ENT_QUOTES, "UTF-8") ?>)'>
+                                            data-product='<?= $prod_json ?>'
+                                            onclick="showProductModal(this)">
                                         <i class="fa-solid fa-eye text-primary"></i>
                                     </button>
 
@@ -634,79 +711,224 @@ if ($db_connected && $pdo) {
 </div>
 
 <!-- Modal: View Product Details -->
-<div class="modal fade" id="productViewModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered modal-lg">
+<div class="modal fade" id="productViewModal" tabindex="-1" aria-labelledby="productViewModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
         <div class="modal-content border-0 shadow-lg rounded-4 overflow-hidden">
+            <!-- Modal Header -->
             <div class="modal-header text-white p-3 px-4" style="background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);">
-                <div>
-                    <span class="badge bg-white text-primary fw-bold font-monospace px-2 py-1 mb-1" id="vProdCode">PRD-0001</span>
-                    <h5 class="modal-title fw-bold text-white mb-0" id="vProdName">Product Details</h5>
+                <div class="d-flex align-items-center gap-2">
+                    <div>
+                        <div class="d-flex align-items-center gap-2 mb-1">
+                            <span class="badge bg-white text-primary fw-bold font-monospace px-2 py-1" id="vProdCode">PRD-0001</span>
+                            <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1 fw-semibold" id="vProdStatus">Active</span>
+                        </div>
+                        <h5 class="modal-title fw-bold text-white mb-0" id="vProdName">Product Details</h5>
+                    </div>
                 </div>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <button type="button" class="close text-white opacity-75" data-dismiss="modal" data-bs-dismiss="modal" aria-label="Close" style="background:none; border:none; font-size:1.5rem;">
+                    <span aria-hidden="true">&times;</span>
+                </button>
             </div>
+
             <div class="modal-body p-4 bg-light">
-                <!-- Meta Tags Row -->
+                <!-- Master Info Badges Row -->
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6 col-12">
+                        <div class="p-2 px-3 rounded-3 bg-white border d-flex align-items-center gap-2 h-100 shadow-sm">
+                            <div class="rounded-circle bg-primary-subtle p-2 text-primary d-flex align-items-center justify-content-center flex-shrink-0" style="width: 38px; height: 38px;">
+                                <i class="fa-solid fa-industry fs-6"></i>
+                            </div>
+                            <div class="overflow-hidden">
+                                <span class="text-muted d-block text-uppercase fw-semibold" style="font-size: 0.70rem; letter-spacing: 0.5px;">Company / Manufacturer</span>
+                                <strong class="text-dark text-truncate d-block" id="vProdCompany">—</strong>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-6">
+                        <div class="p-2 px-3 rounded-3 bg-white border d-flex align-items-center gap-2 h-100 shadow-sm">
+                            <div class="rounded-circle p-2 d-flex align-items-center justify-content-center flex-shrink-0" style="width: 38px; height: 38px; background-color: #ccfbf1; color: #0d9488;">
+                                <i class="fa-solid fa-capsules fs-6"></i>
+                            </div>
+                            <div class="overflow-hidden">
+                                <span class="text-muted d-block text-uppercase fw-semibold" style="font-size: 0.70rem; letter-spacing: 0.5px;">Category / Form</span>
+                                <strong class="text-dark text-truncate d-block" id="vProdCategory">—</strong>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-3 col-6">
+                        <div class="p-2 px-3 rounded-3 bg-white border d-flex align-items-center gap-2 h-100 shadow-sm">
+                            <div class="rounded-circle bg-secondary-subtle p-2 text-secondary d-flex align-items-center justify-content-center flex-shrink-0" style="width: 38px; height: 38px;">
+                                <i class="fa-solid fa-boxes-stacked fs-6"></i>
+                            </div>
+                            <div class="overflow-hidden">
+                                <span class="text-muted d-block text-uppercase fw-semibold" style="font-size: 0.70rem; letter-spacing: 0.5px;">Stock Unit</span>
+                                <strong class="text-dark text-truncate d-block" id="vProdUnit">Pcs</strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Secondary Meta Tags: Rack & Barcode -->
                 <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
-                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
-                        <i class="fa-solid fa-industry text-primary me-1"></i> <span id="vProdCompany">Company</span>
+                    <span class="badge bg-white text-secondary border px-3 py-2 fw-medium shadow-sm">
+                        <i class="fa-solid fa-location-dot text-danger me-1"></i> Rack / Shelf: <strong class="text-dark" id="vProdRack">—</strong>
                     </span>
-                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
-                        <i class="fa-solid fa-capsules text-teal me-1" style="color:#0d9488;"></i> <span id="vProdCategory">Category</span>
-                    </span>
-                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
-                        <i class="fa-solid fa-barcode text-secondary me-1"></i> Batch: <strong id="vProdBatch" class="font-monospace text-primary">—</strong>
-                    </span>
-                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
-                        <i class="fa-regular fa-calendar-alt text-danger me-1"></i> Expiry: <strong id="vProdExpiry">—</strong>
-                    </span>
-                    <span class="badge bg-white text-dark border px-3 py-2 fw-semibold">
-                        <i class="fa-solid fa-layer-group text-success me-1"></i> Unit: <strong>Pieces (Pcs)</strong>
+                    <span class="badge bg-white text-secondary border px-3 py-2 fw-medium shadow-sm">
+                        <i class="fa-solid fa-barcode text-dark me-1"></i> Barcode: <strong class="text-dark font-monospace" id="vProdBarcode">—</strong>
                     </span>
                 </div>
 
-                <!-- Pricing Card -->
-                <div class="card border-0 shadow-sm rounded-3 p-3 mb-3 bg-white">
-                    <div class="fw-bold text-dark mb-2 d-flex align-items-center gap-2">
-                        <i class="fa-solid fa-money-bill-alt text-success"></i> Pricing & Rate Details
+                <!-- HIGHLIGHT CARD 1: Batch & Expiry Details (User's primary request) -->
+                <div class="card border-0 shadow-sm rounded-3 mb-3 bg-white" style="border-left: 4px solid #0284c7 !important;">
+                    <div class="card-header bg-white py-2 px-3 border-bottom d-flex align-items-center justify-content-between">
+                        <span class="fw-bold text-dark d-flex align-items-center gap-2">
+                            <i class="fa-solid fa-calendar-check text-primary"></i> Active Batch & Expiry Details
+                        </span>
+                        <span class="badge" id="vProdExpiryStatus">Valid</span>
                     </div>
-                    <div class="row g-2 text-center">
-                        <div class="col-4">
-                            <div class="p-2 rounded-2 bg-light border">
-                                <span class="text-muted small d-block">Trade Price / TP</span>
-                                <span class="fw-bold text-primary fs-6" id="vTp">Rs. 0.00</span>
+                    <div class="card-body p-3">
+                        <div class="row g-2 text-center align-items-center">
+                            <div class="col-6">
+                                <div class="p-3 rounded-3 bg-light border">
+                                    <span class="text-muted small d-block mb-1 fw-semibold text-uppercase" style="font-size: 0.72rem;">Batch Number</span>
+                                    <div class="fw-bold text-primary font-monospace fs-5" id="vProdBatch">—</div>
+                                </div>
                             </div>
-                        </div>
-                        <div class="col-4">
-                            <div class="p-2 rounded-2 bg-light border">
-                                <span class="text-muted small d-block">Sale Discount</span>
-                                <span class="fw-bold text-info fs-6" id="vDisc">0.00%</span>
-                            </div>
-                        </div>
-                        <div class="col-4">
-                            <div class="p-2 rounded-2 bg-light border">
-                                <span class="text-muted small d-block">Sale Rate</span>
-                                <span class="fw-bold text-success fs-6" id="vSale">Rs. 0.00</span>
+                            <div class="col-6">
+                                <div class="p-3 rounded-3 bg-light border">
+                                    <span class="text-muted small d-block mb-1 fw-semibold text-uppercase" style="font-size: 0.72rem;">Expiry Date</span>
+                                    <div class="fw-bold text-dark font-monospace fs-5" id="vProdExpiry">—</div>
+                                    <div class="text-muted small mt-1" id="vProdDaysLeft" style="font-size: 0.75rem;">—</div>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Live Stock Breakdown Card -->
-                <div class="card border-0 shadow-sm rounded-3 p-3 bg-white">
-                    <div class="fw-bold text-dark mb-2 d-flex align-items-center justify-content-between">
-                        <div><i class="fa-solid fa-warehouse text-warning me-1"></i> Stock Available</div>
+                <!-- HIGHLIGHT CARD 2: Pricing & Commercial Rate Details -->
+                <div class="card border-0 shadow-sm rounded-3 mb-3 bg-white" style="border-left: 4px solid #10b981 !important;">
+                    <div class="card-header bg-white py-2 px-3 border-bottom d-flex align-items-center justify-content-between">
+                        <span class="fw-bold text-dark d-flex align-items-center gap-2">
+                            <i class="fa-solid fa-receipt text-success"></i> Pricing & Rate Details
+                        </span>
+                        <span class="badge bg-success-subtle text-success border border-success-subtle" id="vMarginBadge">Margin: Rs. 0.00</span>
+                    </div>
+                    <div class="card-body p-3">
+                        <div class="row g-2 text-center mb-2">
+                            <div class="col-4">
+                                <div class="p-2 rounded-2 bg-light border">
+                                    <span class="text-muted small d-block fw-semibold" style="font-size: 0.72rem;">Trade Price (TP)</span>
+                                    <span class="fw-bold text-primary fs-6 font-monospace" id="vTp">Rs. 0.00</span>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="p-2 rounded-2 bg-light border">
+                                    <span class="text-muted small d-block fw-semibold" style="font-size: 0.72rem;">Sale Discount</span>
+                                    <span class="fw-bold text-warning fs-6 font-monospace" id="vDisc">0.00%</span>
+                                </div>
+                            </div>
+                            <div class="col-4">
+                                <div class="p-2 rounded-2 bg-light border">
+                                    <span class="text-muted small d-block fw-semibold" style="font-size: 0.72rem;">Sale Rate</span>
+                                    <span class="fw-bold text-success fs-6 font-monospace" id="vSale">Rs. 0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row g-2 text-center">
+                            <div class="col-6">
+                                <div class="p-2 rounded-2 bg-white border border-dashed">
+                                    <span class="text-muted small d-block" style="font-size: 0.72rem;">Purchase Cost (Inward)</span>
+                                    <span class="fw-bold text-secondary font-monospace" id="vCost">Rs. 0.00</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="p-2 rounded-2 bg-white border border-dashed">
+                                    <span class="text-muted small d-block" style="font-size: 0.72rem;">Retail Price (MRP)</span>
+                                    <span class="fw-bold text-dark font-monospace" id="vRetail">Rs. 0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- HIGHLIGHT CARD 3: Stock Overview -->
+                <div class="card border-0 shadow-sm rounded-3 mb-3 bg-white" style="border-left: 4px solid #f59e0b !important;">
+                    <div class="card-header bg-white py-2 px-3 border-bottom d-flex align-items-center justify-content-between">
+                        <span class="fw-bold text-dark d-flex align-items-center gap-2">
+                            <i class="fa-solid fa-warehouse text-warning"></i> Stock on Hand
+                        </span>
                         <span class="badge" id="vStockBadge">In Stock</span>
                     </div>
-                    <div class="p-3 rounded-2 bg-light border text-center">
-                        <div class="text-muted small mb-1">Available Quantity on Hand</div>
-                        <div class="fw-bold text-primary display-6" id="vStockPacks">0</div>
-                        <div class="text-muted small mt-1">Pieces (Pcs) in Warehouse</div>
+                    <div class="card-body p-3">
+                        <div class="row g-2 align-items-center text-center">
+                            <div class="col-md-6 col-12">
+                                <div class="p-3 rounded-2 bg-light border">
+                                    <div class="text-muted small mb-1 fw-semibold text-uppercase" style="font-size: 0.72rem;">Available Physical Stock</div>
+                                    <div class="fw-bold text-primary display-6 font-monospace" id="vStockPacks">0</div>
+                                    <div class="text-muted small mt-1">Available in Distribution Store</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6 col-12">
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <div class="p-2 rounded-2 bg-light border">
+                                            <span class="text-muted small d-block" style="font-size: 0.72rem;">Opening Stock</span>
+                                            <strong class="text-dark fs-6 font-monospace" id="vOpeningStock">0</strong>
+                                        </div>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="p-2 rounded-2 bg-light border">
+                                            <span class="text-muted small d-block" style="font-size: 0.72rem;">Reorder Alert</span>
+                                            <strong class="text-danger fs-6 font-monospace" id="vReorderLevel">10</strong>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
+
+                <!-- HIGHLIGHT CARD 4: All Recorded Batches (Multi-Batch Breakdown Table) -->
+                <div class="card border-0 shadow-sm rounded-3 bg-white">
+                    <div class="card-header bg-white py-2 px-3 border-bottom d-flex align-items-center justify-content-between">
+                        <span class="fw-bold text-dark d-flex align-items-center gap-2">
+                            <i class="fa-solid fa-list-check text-info"></i> All Batches Breakdown
+                        </span>
+                        <span class="badge bg-light text-secondary border font-monospace" id="vBatchCountBadge">0 Batches</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover mb-0" style="font-size: 0.82rem;">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="ps-3 py-2">Batch #</th>
+                                        <th class="py-2 text-center">Expiry Date</th>
+                                        <th class="py-2 text-end">Purchase Cost</th>
+                                        <th class="py-2 text-center">Batch Stock</th>
+                                        <th class="pe-3 py-2 text-center">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="vBatchTableBody">
+                                    <tr>
+                                        <td colspan="5" class="text-center py-3 text-muted">
+                                            <i class="fa-solid fa-spinner fa-spin me-1"></i> Loading batches...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
             </div>
+
+            <!-- Modal Footer -->
             <div class="modal-footer p-3 bg-white border-top d-flex justify-content-between">
-                <button type="button" class="btn btn-outline-secondary px-3 rounded-3" data-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-outline-secondary px-4 rounded-3" data-dismiss="modal" data-bs-dismiss="modal">Close</button>
                 <div class="d-flex gap-2">
+                    <a href="#" id="vBtnOpening" class="btn btn-outline-primary fw-semibold px-3 rounded-3">
+                        <i class="fa-solid fa-plus-circle me-1"></i> Add / Adjust Stock
+                    </a>
                     <a href="#" id="vBtnEdit" class="btn btn-warning fw-bold px-4 rounded-3 text-dark">
                         <i class="fa-solid fa-edit me-1"></i> Edit Product
                     </a>
@@ -717,50 +939,355 @@ if ($db_connected && $pdo) {
 </div>
 
 <script>
-function showProductModal(p) {
-    document.getElementById('vProdCode').textContent = p.code || 'PRD-0000';
-    document.getElementById('vProdName').textContent = p.name || '';
-    document.getElementById('vProdCompany').textContent = p.company || 'General Pharma';
-    document.getElementById('vProdCategory').textContent = p.category || 'General Dosage';
-    if (document.getElementById('vProdBatch')) document.getElementById('vProdBatch').textContent = p.batch || '—';
-    if (document.getElementById('vProdExpiry')) document.getElementById('vProdExpiry').textContent = p.expiry || '—';
-    if (document.getElementById('vBtnEdit')) document.getElementById('vBtnEdit').href = 'edit_product.php?id=' + p.id;
+function showProductModal(input) {
+    let p = {};
+    try {
+        if (!input) {
+            p = {};
+        } else if (typeof input === 'object' && input.nodeType === 1) {
+            // It's a DOM element (this)
+            const jsonStr = input.getAttribute('data-product');
+            p = jsonStr ? JSON.parse(jsonStr) : {};
+        } else if (typeof input === 'object') {
+            p = input;
+        } else if (typeof input === 'string') {
+            p = JSON.parse(input);
+        }
+    } catch (e) {
+        console.error('Error parsing product data:', e);
+        p = {};
+    }
 
-    const tp   = parseFloat(p.tp) || 0;
-    const disc = parseFloat(p.disc) || 0;
-    const sale = parseFloat(p.sale) || (tp > 0 ? (tp * (1 - (disc / 100))) : 0);
+    // Immediately open modal
+    openProductModal();
 
-    if (document.getElementById('vTp')) document.getElementById('vTp').textContent = 'Rs. ' + tp.toFixed(2);
-    if (document.getElementById('vDisc')) document.getElementById('vDisc').textContent = disc.toFixed(2) + '%';
-    if (document.getElementById('vSale')) document.getElementById('vSale').textContent = 'Rs. ' + sale.toFixed(2);
+    try {
+        // 1. Header & Master Info
+        const codeEl = document.getElementById('vProdCode');
+        if (codeEl) codeEl.textContent = p.code || 'PRD-0000';
 
-    const stock = parseFloat(p.stock) || 0;
-    const reorder = parseFloat(p.reorder) || 10;
-    document.getElementById('vStockPacks').textContent = stock + ' ' + (p.stock_unit || 'Packs');
-    if (document.getElementById('vStockBoxes')) document.getElementById('vStockBoxes').textContent = p.stock_boxes + ' Boxes';
-    if (document.getElementById('vStockTabs')) document.getElementById('vStockTabs').textContent = p.stock_tabs + ' Tablets';
+        const nameEl = document.getElementById('vProdName');
+        if (nameEl) nameEl.textContent = p.name || 'Product Details';
 
-    const badge = document.getElementById('vStockBadge');
-    if (stock <= 0) {
-        badge.textContent = 'Out of Stock';
-        badge.className = 'badge bg-danger';
-    } else if (stock <= reorder) {
-        badge.textContent = 'Low Stock (' + stock + ')';
-        badge.className = 'badge bg-warning text-dark';
+        const statusBadge = document.getElementById('vProdStatus');
+        if (statusBadge) {
+            const isAct = (p.status || 'Active').toLowerCase() === 'active';
+            statusBadge.textContent = isAct ? 'Active' : 'Inactive';
+            statusBadge.className = isAct 
+                ? 'badge bg-success-subtle text-success border border-success-subtle px-2 py-1 fw-semibold' 
+                : 'badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1 fw-semibold';
+        }
+
+        const compEl = document.getElementById('vProdCompany');
+        if (compEl) compEl.textContent = (p.company && p.company !== '—') ? p.company : 'Not Assigned';
+
+        const catEl = document.getElementById('vProdCategory');
+        if (catEl) catEl.textContent = (p.category && p.category !== '—') ? p.category : 'Not Assigned';
+
+        const unitEl = document.getElementById('vProdUnit');
+        if (unitEl) unitEl.textContent = p.stock_unit || 'Pcs';
+
+        const rackEl = document.getElementById('vProdRack');
+        if (rackEl) rackEl.textContent = p.location_rack || '—';
+
+        const barEl = document.getElementById('vProdBarcode');
+        if (barEl) barEl.textContent = p.barcode || '—';
+
+        // 2. Active Batch & Expiry
+        const batchEl = document.getElementById('vProdBatch');
+        if (batchEl) batchEl.textContent = p.batch || '—';
+
+        const expEl = document.getElementById('vProdExpiry');
+        if (expEl) expEl.textContent = p.expiry || '—';
+
+        // Expiry calculation
+        const expBadge = document.getElementById('vProdExpiryStatus');
+        const daysLeftEl = document.getElementById('vProdDaysLeft');
+        if (p.raw_expiry && p.raw_expiry !== '0000-00-00') {
+            const dateStr = p.raw_expiry.indexOf('T') > -1 ? p.raw_expiry : (p.raw_expiry.split(' ')[0] + 'T00:00:00');
+            const expDate = new Date(dateStr);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            if (!isNaN(expDate.getTime())) {
+                const diffMs = expDate.getTime() - today.getTime();
+                const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+                if (diffDays < 0) {
+                    if (expBadge) {
+                        expBadge.textContent = 'Expired';
+                        expBadge.className = 'badge bg-danger text-white px-2 py-1';
+                    }
+                    if (daysLeftEl) {
+                        daysLeftEl.textContent = 'Expired ' + Math.abs(diffDays) + ' days ago';
+                        daysLeftEl.className = 'text-danger small mt-1 fw-bold';
+                    }
+                } else if (diffDays <= 90) {
+                    if (expBadge) {
+                        expBadge.textContent = 'Expiring Soon';
+                        expBadge.className = 'badge bg-warning text-dark px-2 py-1';
+                    }
+                    if (daysLeftEl) {
+                        daysLeftEl.textContent = diffDays + ' days remaining';
+                        daysLeftEl.className = 'text-warning-emphasis small mt-1 fw-semibold';
+                    }
+                } else {
+                    if (expBadge) {
+                        expBadge.textContent = 'Valid';
+                        expBadge.className = 'badge bg-success text-white px-2 py-1';
+                    }
+                    const years = Math.floor(diffDays / 365);
+                    const remDays = diffDays % 365;
+                    const months = Math.floor(remDays / 30);
+                    let timeStr = '';
+                    if (years > 0) timeStr += years + ' yr ';
+                    if (months > 0) timeStr += months + ' mos ';
+                    if (!timeStr) timeStr = diffDays + ' days ';
+                    if (daysLeftEl) {
+                        daysLeftEl.textContent = timeStr + 'remaining (' + diffDays + ' days)';
+                        daysLeftEl.className = 'text-muted small mt-1';
+                    }
+                }
+            } else {
+                if (expBadge) {
+                    expBadge.textContent = 'No Expiry';
+                    expBadge.className = 'badge bg-secondary text-white px-2 py-1';
+                }
+                if (daysLeftEl) {
+                    daysLeftEl.textContent = '—';
+                    daysLeftEl.className = 'text-muted small mt-1';
+                }
+            }
+        } else {
+            if (expBadge) {
+                expBadge.textContent = 'No Expiry';
+                expBadge.className = 'badge bg-secondary text-white px-2 py-1';
+            }
+            if (daysLeftEl) {
+                daysLeftEl.textContent = 'No expiration date recorded';
+                daysLeftEl.className = 'text-muted small mt-1';
+            }
+        }
+
+        // 3. Pricing & Rates
+        const tp   = parseFloat(p.tp) || 0;
+        const disc = parseFloat(p.disc) || 0;
+        const sale = parseFloat(p.sale) || (tp > 0 ? (tp * (1 - (disc / 100))) : 0);
+        const cost = parseFloat(p.cost) || 0;
+        const retail = parseFloat(p.retail) || 0;
+        const profit = sale - cost;
+        const marginPct = (cost > 0) ? ((profit / cost) * 100).toFixed(1) : '0';
+
+        const tpEl = document.getElementById('vTp');
+        if (tpEl) tpEl.textContent = 'Rs. ' + tp.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        const discEl = document.getElementById('vDisc');
+        if (discEl) discEl.textContent = disc.toFixed(2) + '%';
+
+        const saleEl = document.getElementById('vSale');
+        if (saleEl) saleEl.textContent = 'Rs. ' + sale.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        const costEl = document.getElementById('vCost');
+        if (costEl) costEl.textContent = 'Rs. ' + cost.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        const retEl = document.getElementById('vRetail');
+        if (retEl) retEl.textContent = 'Rs. ' + retail.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        const marginBadge = document.getElementById('vMarginBadge');
+        if (marginBadge) {
+            marginBadge.textContent = 'Profit: Rs. ' + profit.toFixed(2) + ' (' + (profit >= 0 ? '+' : '') + marginPct + '%)';
+            marginBadge.className = profit >= 0 
+                ? 'badge bg-success-subtle text-success border border-success-subtle' 
+                : 'badge bg-danger-subtle text-danger border border-danger-subtle';
+        }
+
+        // 4. Stock Details
+        const stock = parseFloat(p.stock) || 0;
+        const reorder = parseFloat(p.reorder) || 10;
+        const unitLabel = p.stock_unit || 'Pcs';
+
+        const stockPacksEl = document.getElementById('vStockPacks');
+        if (stockPacksEl) stockPacksEl.textContent = stock + ' ' + unitLabel;
+
+        const openEl = document.getElementById('vOpeningStock');
+        if (openEl) openEl.textContent = (parseFloat(p.opening_stock) || 0) + ' ' + unitLabel;
+
+        const reorderEl = document.getElementById('vReorderLevel');
+        if (reorderEl) reorderEl.textContent = reorder + ' ' + unitLabel;
+
+        const badge = document.getElementById('vStockBadge');
+        if (badge) {
+            if (stock <= 0) {
+                badge.textContent = 'Out of Stock (0)';
+                badge.className = 'badge bg-danger text-white px-2 py-1';
+            } else if (stock <= reorder) {
+                badge.textContent = 'Low Stock (' + stock + ')';
+                badge.className = 'badge bg-warning text-dark px-2 py-1';
+            } else {
+                badge.textContent = 'In Stock (' + stock + ')';
+                badge.className = 'badge bg-success text-white px-2 py-1';
+            }
+        }
+
+        // 5. Action Buttons
+        const btnEdit = document.getElementById('vBtnEdit');
+        if (btnEdit && p.id) {
+            btnEdit.href = 'edit_product.php?id=' + p.id;
+        }
+
+        const btnOpening = document.getElementById('vBtnOpening');
+        if (btnOpening && p.id) {
+            btnOpening.href = 'add_opening_stock.php?product_id=' + p.id;
+        }
+
+        // 6. Fetch all batches for this product via AJAX
+        if (p.id) {
+            const batchTbody = document.getElementById('vBatchTableBody');
+            const batchCountBadge = document.getElementById('vBatchCountBadge');
+            if (batchTbody) {
+                batchTbody.innerHTML = '<tr><td colspan="5" class="text-center py-3 text-muted"><i class="fa-solid fa-spinner fa-spin me-1"></i> Loading batches...</td></tr>';
+            }
+
+            fetch('view_product_list.php?action=get_batches&id=' + p.id)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success && Array.isArray(data.batches) && data.batches.length > 0) {
+                        if (batchCountBadge) {
+                            batchCountBadge.textContent = data.batches.length + (data.batches.length === 1 ? ' Batch' : ' Batches');
+                        }
+                        let html = '';
+                        data.batches.forEach(b => {
+                            const bStock = parseFloat(b.current_stock) || 0;
+                            const bCost = parseFloat(b.purchase_price) || 0;
+                            const bExp = b.expiry_date && b.expiry_date !== '0000-00-00' ? b.expiry_date : '—';
+                            
+                            let bStatus = b.status || 'Active';
+                            let bBadgeClass = 'badge bg-secondary-subtle text-secondary';
+                            if (bStock > 0) {
+                                bBadgeClass = 'badge bg-success-subtle text-success border border-success-subtle';
+                            } else if (bStock === 0) {
+                                bBadgeClass = 'badge bg-danger-subtle text-danger border border-danger-subtle';
+                            }
+
+                            html += `
+                                <tr>
+                                    <td class="ps-3 py-2 fw-semibold font-monospace text-primary">
+                                        <i class="fa-solid fa-barcode text-secondary me-1 opacity-75"></i>${escapeHtml(b.batch_no || 'DEFAULT')}
+                                    </td>
+                                    <td class="py-2 text-center font-monospace">${escapeHtml(bExp)}</td>
+                                    <td class="py-2 text-end font-monospace text-muted">Rs. ${bCost.toFixed(2)}</td>
+                                    <td class="py-2 text-center font-monospace fw-bold ${bStock > 0 ? 'text-dark' : 'text-danger'}">
+                                        ${bStock} ${escapeHtml(unitLabel)}
+                                    </td>
+                                    <td class="pe-3 py-2 text-center">
+                                        <span class="${bBadgeClass}" style="font-size: 0.72rem;">${escapeHtml(bStatus)}</span>
+                                    </td>
+                                </tr>
+                            `;
+                        });
+                        if (batchTbody) batchTbody.innerHTML = html;
+                    } else {
+                        if (batchCountBadge) {
+                            batchCountBadge.textContent = (p.batch && p.batch !== '—') ? '1 Batch' : '0 Batches';
+                        }
+                        if (batchTbody) {
+                            batchTbody.innerHTML = `
+                                <tr>
+                                    <td class="ps-3 py-2 fw-semibold font-monospace text-primary">${escapeHtml(p.batch || '—')}</td>
+                                    <td class="py-2 text-center font-monospace">${escapeHtml(p.expiry || '—')}</td>
+                                    <td class="py-2 text-end font-monospace text-muted">Rs. ${cost.toFixed(2)}</td>
+                                    <td class="py-2 text-center font-monospace fw-bold">${stock} ${escapeHtml(unitLabel)}</td>
+                                    <td class="pe-3 py-2 text-center"><span class="badge bg-primary-subtle text-primary" style="font-size: 0.72rem;">Current</span></td>
+                                </tr>
+                            `;
+                        }
+                    }
+                })
+                .catch(() => {
+                    if (batchCountBadge) batchCountBadge.textContent = (p.batch && p.batch !== '—') ? '1 Batch' : '0 Batches';
+                    if (batchTbody) {
+                        batchTbody.innerHTML = `
+                            <tr>
+                                <td class="ps-3 py-2 fw-semibold font-monospace text-primary">${escapeHtml(p.batch || '—')}</td>
+                                <td class="py-2 text-center font-monospace">${escapeHtml(p.expiry || '—')}</td>
+                                <td class="py-2 text-end font-monospace text-muted">Rs. ${cost.toFixed(2)}</td>
+                                <td class="py-2 text-center font-monospace fw-bold">${stock} ${escapeHtml(unitLabel)}</td>
+                                <td class="pe-3 py-2 text-center"><span class="badge bg-primary-subtle text-primary" style="font-size: 0.72rem;">Current</span></td>
+                            </tr>
+                        `;
+                    }
+                });
+        }
+    } catch (err) {
+        console.error('Error populating product modal fields:', err);
+    }
+}
+
+function openProductModal() {
+    const modalEl = document.getElementById('productViewModal');
+    if (!modalEl) return;
+
+    if (window.jQuery && typeof window.jQuery.fn.modal === 'function') {
+        window.jQuery('#productViewModal').modal('show');
+    } else if (typeof $ !== 'undefined' && typeof $.fn !== 'undefined' && typeof $.fn.modal === 'function') {
+        $('#productViewModal').modal('show');
     } else {
-        badge.textContent = 'In Stock (' + stock + ')';
-        badge.className = 'badge bg-success';
+        // Pure CSS/DOM fallback
+        modalEl.classList.add('show');
+        modalEl.style.display = 'block';
+        modalEl.removeAttribute('aria-hidden');
+        modalEl.setAttribute('aria-modal', 'true');
+        document.body.classList.add('modal-open');
+        
+        let backdrop = document.querySelector('.modal-backdrop');
+        if (!backdrop) {
+            backdrop = document.createElement('div');
+            backdrop.className = 'modal-backdrop fade show';
+            document.body.appendChild(backdrop);
+        }
     }
+}
 
-    if (document.getElementById('vBtnInward')) {
-        document.getElementById('vBtnInward').href = 'add_opening_stock.php?product_id=' + p.id;
+function closeProductModal() {
+    const modalEl = document.getElementById('productViewModal');
+    if (!modalEl) return;
+
+    if (window.jQuery && typeof window.jQuery.fn.modal === 'function') {
+        window.jQuery('#productViewModal').modal('hide');
+    } else if (typeof $ !== 'undefined' && typeof $.fn !== 'undefined' && typeof $.fn.modal === 'function') {
+        $('#productViewModal').modal('hide');
+    } else {
+        modalEl.classList.remove('show');
+        modalEl.style.display = 'none';
+        modalEl.setAttribute('aria-hidden', 'true');
+        modalEl.removeAttribute('aria-modal');
+        document.body.classList.remove('modal-open');
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) backdrop.remove();
     }
+}
 
-    if (document.getElementById('vBtnEdit')) {
-        document.getElementById('vBtnEdit').href = 'edit_product.php?id=' + p.id;
-    }
+// Global delegated click listener so clicking ANY .btn-view button ALWAYS opens modal
+document.addEventListener('DOMContentLoaded', function() {
+    document.addEventListener('click', function(e) {
+        const btn = e.target.closest('.btn-view');
+        if (btn) {
+            e.preventDefault();
+            showProductModal(btn);
+        }
+    });
+});
 
-    $('#productViewModal').modal('show');
+function escapeHtml(text) {
+    if (!text) return '';
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return String(text).replace(/[&<>"']/g, function(m) { return map[m]; });
 }
 </script>
 

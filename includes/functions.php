@@ -1,6 +1,5 @@
 <?php
 // ===== BESTWAY DISTRIBUTION - HELPER FUNCTIONS =====
-
 // ---- Currency & Date ----
 if (!function_exists('format_currency')) {
     function format_currency($amount) {

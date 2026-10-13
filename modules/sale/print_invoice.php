@@ -235,6 +235,7 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
 .inv-table td { padding:6px 8px; border:1px solid #e2e8f0; font-size:12px; vertical-align:middle; }
 .inv-table tbody tr:nth-child(even) td { background:#f8fafc; }
 .inv-table tfoot td { background:#ecfdf5 !important; border:1px solid #a7f3d0 !important; font-weight:700; font-size:12px; }
+.inv-prod-name { font-size:15px; font-weight:800; color:#0f172a; line-height:1.25; display:inline-block; }
 
 /* ── Totals box ──────────────────────────────────────────────── */
 .totals-box { border:1px solid #e2e8f0; border-radius:6px; padding:12px 16px; background:#f8fafc; }
@@ -271,6 +272,7 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
   .invoice-wrap { box-shadow:none; margin:0; padding:10px 14px; max-width:100%; border-radius:0; }
   .inv-table th { background:#1e293b !important; color:#fff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   .inv-table tfoot td { background:#ecfdf5 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .inv-prod-name { font-size:16px !important; font-weight:800 !important; color:#000 !important; }
   @page { size:A4 portrait; margin:8mm 8mm; }
 }
 </style>
@@ -488,9 +490,9 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
       <tr>
         <td class="text-center text-muted"><?= $idx + 1 ?></td>
         <td>
-          <strong><?= $name ?></strong>
-          <?php if ($generic): ?><span class="text-muted"> — <?= $generic ?></span><?php endif; ?>
-          <?php if ($company_nm): ?><br><small class="text-muted"><?= $company_nm ?></small><?php endif; ?>
+          <span class="inv-prod-name"><?= $name ?></span>
+          <?php if ($generic): ?><span class="text-muted" style="font-size:11.5px;"> — <?= $generic ?></span><?php endif; ?>
+          <?php if ($company_nm): ?><br><small class="text-muted" style="font-size:11px;"><?= $company_nm ?></small><?php endif; ?>
         </td>
         <td class="text-center font-monospace" style="white-space:nowrap; font-size:11px; font-weight:600;"><?= $batch ?></td>
         <td class="text-center font-weight-bold"><?= number_format($qty) ?></td>

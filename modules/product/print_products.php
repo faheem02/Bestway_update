@@ -76,25 +76,31 @@ if ($db_connected && $pdo) {
         $stmt = $pdo->prepare("
             SELECT 
                 p.*,
-                c.name as company_name,
+                COALESCE(c.name, (
+                    SELECT COALESCE(NULLIF(s.company_name, ''), s.name)
+                    FROM purchases pu
+                    JOIN suppliers s ON pu.supplier_id = s.id
+                    JOIN purchase_items pi ON pi.purchase_id = pu.id
+                    WHERE pi.product_id = p.id
+                    ORDER BY pu.id DESC LIMIT 1
+                )) as company_name,
                 cat.name as category_name,
                 u.name as unit_name,
                 u.short_name as unit_short,
-                pb.batch_no,
-                pb.expiry_date
+                COALESCE(
+                    (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
+                    (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
+                    (SELECT pi.batch_no FROM purchase_items pi WHERE pi.product_id = p.id AND pi.batch_no IS NOT NULL AND pi.batch_no != '' ORDER BY pi.id DESC LIMIT 1)
+                ) as batch_no,
+                COALESCE(
+                    (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
+                    (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
+                    (SELECT pi.expiry_date FROM purchase_items pi WHERE pi.product_id = p.id AND pi.expiry_date IS NOT NULL ORDER BY pi.id DESC LIMIT 1)
+                ) as expiry_date
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
             LEFT JOIN units u ON p.unit_id = u.id
-            LEFT JOIN (
-                SELECT pb1.product_id, pb1.batch_no, pb1.expiry_date
-                FROM product_batches pb1
-                INNER JOIN (
-                    SELECT product_id, MAX(id) as max_id
-                    FROM product_batches
-                    GROUP BY product_id
-                ) pb2 ON pb1.id = pb2.max_id
-            ) pb ON pb.product_id = p.id
             WHERE $where_sql
             ORDER BY p.name ASC
         ");

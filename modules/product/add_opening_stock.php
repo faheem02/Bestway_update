@@ -44,7 +44,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_stock'])) {
 
                 // Direct piece quantity addition
                 $packs_to_add = $qty;
-
                 if (empty($batch_no)) {
                     $batch_no = "BAT-" . date('ymd-Hi');
                 }
@@ -68,6 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_stock'])) {
                 ");
                 $upd_stmt->execute([$packs_to_add, $packs_to_add, $product_id]);
 
+                
                 // 2. Insert into product_batches
                 $b_stmt = $pdo->prepare("
                     INSERT INTO product_batches (
