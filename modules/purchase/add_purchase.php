@@ -337,7 +337,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         $stmt_stock->execute([
                             $all_total_stock, 
                             $net_unit_cost, 
-                            $has_sale_disc ? 1 : 0, $sale_disc_pct, 
+                            ($has_sale_disc && $sale_disc_pct > 0) ? 1 : 0, $sale_disc_pct, 
                             $sale_price, $sale_price, 
                             $pid
                         ]);

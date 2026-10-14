@@ -11,7 +11,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
     $q = trim($_GET['q'] ?? '');
     $res = [];
     if ($db_connected && $pdo) {
-        $sql = "SELECT p.id, p.product_code, p.name, p.generic_name, p.trade_price, p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, c.name as company_name, p.discount_percent 
+        $sql = "SELECT p.id, p.product_code, p.name, p.generic_name, p.trade_price, p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, c.name as company_name, 
+                COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.sale_discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.sale_discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as discount_percent 
                 FROM products p 
                 LEFT JOIN companies c ON c.id = p.company_id 
                 WHERE p.status = 'Active'";

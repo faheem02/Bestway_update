@@ -13,7 +13,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
                        COALESCE(NULLIF(p.retail_price, 0), NULLIF(p.trade_price, 0), (SELECT pi.trade_price FROM purchase_items pi WHERE pi.product_id = p.id AND pi.trade_price > 0 ORDER BY pi.id DESC LIMIT 1), p.purchase_price, 0) as sale_price,
                        p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, 
                        p.discount_percent,
-                       p.discount_percent as default_discount,
+                       COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.sale_discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.sale_discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount,
                        c.name as company_name, u.name as base_unit_name 
                 FROM products p 
                 LEFT JOIN companies c ON c.id = p.company_id 
@@ -188,7 +188,7 @@ if ($db_connected && $pdo) {
                 p.stock_unit, 
                 p.packs_per_box,
                 p.discount_percent,
-                p.discount_percent as default_discount,
+                COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.sale_discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.sale_discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount,
                 c.name as company_name,
                 u.name as base_unit_name
             FROM products p
@@ -363,7 +363,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
                 // Verify product and current stock directly from DB
                 $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price, purchase_price,
-                    discount_percent as default_discount
+                    COALESCE(NULLIF(discount_percent, 0), (SELECT pi.sale_discount_percent FROM purchase_items pi WHERE pi.product_id = products.id AND pi.sale_discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = products.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as default_discount
                     FROM products WHERE id = ?");
                 $stmt_chk->execute([$pid]);
                 $prod_row = $stmt_chk->fetch(PDO::FETCH_ASSOC);
@@ -385,11 +385,17 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     throw new Exception("Error: Available stock for '{$p_name}' is only {$available_stock} Pcs, but entered quantity is {$qty}.");
                 }
 
-                // Check 3: Non-admin users cannot change the rate or discount. Force master values.
+                // Check 3: TP price and discount handling
                 if (!isAdmin()) {
                     $master_tp = floatval($prod_row['trade_price'] ?? 0);
                     if ($master_tp <= 0) $master_tp = floatval($prod_row['purchase_price'] ?? 0);
                     if ($master_tp > 0) $tp = $master_tp;
+                }
+                // Allow entered discount; fallback to default master/purchase discount if not entered
+                $entered_disc = (isset($discounts[$i]) && trim((string)$discounts[$i]) !== '') ? floatval($discounts[$i]) : null;
+                if ($entered_disc !== null && $entered_disc >= 0) {
+                    $disc = max(0.0, min(100.0, $entered_disc));
+                } else {
                     $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
                 }
 
@@ -1468,7 +1474,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control tp-input text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" required<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Price is fixed by product master"' ?>>
             </td>
             <td>
-                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
+                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center" placeholder="0.00" value="" onfocus="this.select()" oninput="recalculateAll()">
             </td>
             <td>
                 <input type="text" class="form-control font-weight-bold row-net text-right font-monospace bg-light" id="rowNet_${rowId}" placeholder="0.00" value="" readonly>
@@ -2292,6 +2298,12 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         }
 
         if (itemsBody) {
+            itemsBody.addEventListener('input', function (e) {
+                if (e.target.classList.contains('disc-input') || e.target.classList.contains('tp-input')) {
+                    recalculateAll();
+                }
+            });
+
             itemsBody.addEventListener('click', function (e) {
                 const delBtn = e.target.closest('.remove-row');
                 if (delBtn) {

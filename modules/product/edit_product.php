@@ -58,7 +58,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
     $discount_percent = floatval($_POST['discount_percent'] ?? 0);
     $entered_wholesale = floatval($_POST['wholesale_price'] ?? 0);
     $calc_sale_price  = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
-    $wholesale_price  = $entered_wholesale > 0 ? $entered_wholesale : $calc_sale_price;
+    if ($discount_percent > 0) {
+        $wholesale_price = $calc_sale_price;
+    } else {
+        $wholesale_price = $entered_wholesale > 0 ? $entered_wholesale : $trade_price;
+    }
     $retail_price     = $wholesale_price;
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
     $status           = in_array($_POST['status'] ?? '', ['Active', 'Inactive']) ? $_POST['status'] : 'Active';
