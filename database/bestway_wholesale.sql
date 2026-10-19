@@ -459,7 +459,7 @@ CREATE TABLE IF NOT EXISTS `sale_returns` (
   `sale_id` INT NULL,
   `invoice_id` INT NULL,
   `return_date` DATE NOT NULL,
-  `customer_id` INT NOT NULL,
+  `customer_id` INT NULL,
   `refund_type` VARCHAR(50) DEFAULT 'Credit Note',
   `total_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00,
   `deduction_amount` DECIMAL(12,2) DEFAULT 0.00,

@@ -64,6 +64,8 @@ $queries = [
     "ALTER TABLE `sale_returns` ADD COLUMN `payment_method` VARCHAR(50) NULL",
     "ALTER TABLE `sale_returns` ADD COLUMN `cash_account_id` INT NULL",
     "ALTER TABLE `sale_returns` ADD COLUMN `bank_account_id` INT NULL",
+    // Allow direct/counter customer returns (customer_id may be NULL)
+    "ALTER TABLE `sale_returns` MODIFY COLUMN `customer_id` INT NULL DEFAULT NULL",
     "ALTER TABLE `sale_return_items` ADD COLUMN `return_id` INT NOT NULL DEFAULT 0",
     "ALTER TABLE `sale_return_items` ADD COLUMN `batch_no` VARCHAR(100) NULL",
     "ALTER TABLE `sale_return_items` ADD COLUMN `condition` VARCHAR(50) DEFAULT 'Good'",

@@ -53,6 +53,133 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
     exit;
 }
 
+// AJAX: live customer search (for invoice-based refund)
+if (isset($_GET['action']) && $_GET['action'] === 'search_customer') {
+    header('Content-Type: application/json');
+    $q = trim($_GET['q'] ?? '');
+    $res = [];
+    if ($db_connected && $pdo) {
+        $where = ["(status = 'Active' OR status IS NULL OR status = '' OR LOWER(status) = 'active')"];
+        $params = [];
+
+        if ($q !== '') {
+            $words = preg_split('/\s+/', $q);
+            $wordClauses = [];
+            foreach ($words as $idx => $word) {
+                if ($word === '') continue;
+                $p = ":w" . $idx;
+                $wordClauses[] = "(CONCAT_WS(' ', name, shop_name, phone, area) LIKE $p)";
+                $params[$p] = "%$word%";
+            }
+            if (!empty($wordClauses)) {
+                $where[] = '(' . implode(' AND ', $wordClauses) . ')';
+            }
+
+            $sql = "SELECT id, name, shop_name, phone, current_balance
+                    FROM customers
+                    WHERE " . implode(' AND ', $where) . "
+                    ORDER BY 
+                      CASE 
+                        WHEN shop_name LIKE :exact1 THEN 1 
+                        WHEN name LIKE :exact2 THEN 2 
+                        WHEN shop_name LIKE :start1 THEN 3 
+                        WHEN name LIKE :start2 THEN 4 
+                        ELSE 5 
+                      END, shop_name ASC, name ASC 
+                    LIMIT 100";
+
+            $params[':exact1'] = $q;
+            $params[':exact2'] = $q;
+            $params[':start1'] = "$q%";
+            $params[':start2'] = "$q%";
+        } else {
+            $sql = "SELECT id, name, shop_name, phone, current_balance
+                    FROM customers
+                    WHERE " . implode(' AND ', $where) . "
+                    ORDER BY shop_name ASC, name ASC
+                    LIMIT 100";
+        }
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    echo json_encode($res);
+    exit;
+}
+
+// AJAX: list a customer's invoices
+if (isset($_GET['action']) && $_GET['action'] === 'customer_invoices') {
+    header('Content-Type: application/json');
+    $customer_id = intval($_GET['customer_id'] ?? 0);
+    $res = [];
+    if ($db_connected && $pdo && $customer_id > 0) {
+        $sql = "SELECT si.id, si.invoice_no, si.invoice_date, si.grand_total, si.net_payable, si.paid_amount, si.balance_due,
+                       (SELECT COUNT(*) FROM sale_items x WHERE x.invoice_id = si.id) AS item_count,
+                       (SELECT COALESCE(SUM(sri.total_price), 0)
+                          FROM sale_return_items sri
+                          JOIN sale_returns sr ON sr.id = sri.return_id
+                         WHERE sr.status = 'Completed' AND (sr.invoice_id = si.id OR sr.sale_id = si.id)) AS returned_amount
+                FROM sales_invoices si
+                WHERE si.customer_id = ?
+                ORDER BY si.id DESC
+                LIMIT 300";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$customer_id]);
+        $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    echo json_encode($res);
+    exit;
+}
+
+// AJAX: invoice header + items with sold / already-returned / returnable qty
+if (isset($_GET['action']) && $_GET['action'] === 'invoice_details') {
+    header('Content-Type: application/json');
+    $invoice_id = intval($_GET['invoice_id'] ?? 0);
+    $out = ['invoice' => null, 'items' => []];
+    if ($db_connected && $pdo && $invoice_id > 0) {
+        $stmt = $pdo->prepare("SELECT si.*, c.name AS cust_name, c.shop_name AS cust_shop
+                               FROM sales_invoices si
+                               LEFT JOIN customers c ON c.id = si.customer_id
+                               WHERE si.id = ?");
+        $stmt->execute([$invoice_id]);
+        $inv = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($inv) {
+            $out['invoice'] = $inv;
+
+            $ret_map = [];
+            $stmt_r = $pdo->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS q
+                                     FROM sale_return_items sri
+                                     JOIN sale_returns sr ON sr.id = sri.return_id
+                                     WHERE sr.status = 'Completed' AND (sr.invoice_id = ? OR sr.sale_id = ?)
+                                     GROUP BY sri.product_id");
+            $stmt_r->execute([$invoice_id, $invoice_id]);
+            foreach ($stmt_r->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $ret_map[(int)$r['product_id']] = (int)$r['q'];
+            }
+
+            $stmt_i = $pdo->prepare("SELECT si.*, COALESCE(NULLIF(p.name, ''), si.item_name, 'Medicine') AS product_name,
+                                            p.product_code, p.generic_name, p.current_stock
+                                     FROM sale_items si
+                                     LEFT JOIN products p ON p.id = si.product_id
+                                     WHERE si.invoice_id = ?
+                                     ORDER BY si.id ASC");
+            $stmt_i->execute([$invoice_id]);
+            foreach ($stmt_i->fetchAll(PDO::FETCH_ASSOC) as $it) {
+                $pid = (int)$it['product_id'];
+                $sold = (int)$it['quantity'];
+                $already = $ret_map[$pid] ?? 0;
+                $it['sold_qty'] = $sold;
+                $it['returned_qty'] = $already;
+                $it['returnable_qty'] = max(0, $sold - $already);
+                $out['items'][] = $it;
+            }
+        }
+    }
+    echo json_encode($out);
+    exit;
+}
+
 requireRole(['admin']);
 
 $message = "";
@@ -257,6 +384,159 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
     }
 }
 
+// Handle Form Submission: Create Invoice-Based Return (Refund by Invoice)
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_invoice_return'])) {
+    $return_no       = trim($_POST['return_no'] ?? '');
+    $invoice_id      = intval($_POST['invoice_id'] ?? 0);
+    $customer_id     = intval($_POST['customer_id'] ?? 0);
+    $return_date     = trim($_POST['return_date'] ?? date('Y-m-d'));
+    $refund_type     = trim($_POST['refund_type'] ?? 'Credit Note');
+    $cash_account_id = !empty($_POST['cash_account_id']) ? intval($_POST['cash_account_id']) : null;
+    $bank_account_id = !empty($_POST['bank_account_id']) ? intval($_POST['bank_account_id']) : null;
+    $reason          = trim($_POST['reason'] ?? '');
+    $items           = $_POST['inv_items'] ?? [];
+
+    if ($invoice_id <= 0 || $customer_id <= 0) {
+        $message = "Please select a customer and an invoice to refund.";
+        $msg_type = "danger";
+    } elseif (empty($items) || !is_array($items)) {
+        $message = "Please enter a return quantity for at least one product.";
+        $msg_type = "danger";
+    } else {
+        try {
+            $pdo->beginTransaction();
+
+            // Already-returned quantities for this invoice (per product)
+            $ret_map = [];
+            $stmt_r = $pdo->prepare("SELECT sri.product_id, COALESCE(SUM(sri.quantity), 0) AS q
+                                     FROM sale_return_items sri
+                                     JOIN sale_returns sr ON sr.id = sri.return_id
+                                     WHERE sr.status = 'Completed' AND (sr.invoice_id = ? OR sr.sale_id = ?)
+                                     GROUP BY sri.product_id");
+            $stmt_r->execute([$invoice_id, $invoice_id]);
+            foreach ($stmt_r->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $ret_map[(int)$r['product_id']] = (int)$r['q'];
+            }
+
+            // Sold quantities for this invoice (per product)
+            $sold_map = [];
+            $stmt_s = $pdo->prepare("SELECT product_id, batch_no, quantity, unit_price FROM sale_items WHERE invoice_id = ?");
+            $stmt_s->execute([$invoice_id]);
+            foreach ($stmt_s->fetchAll(PDO::FETCH_ASSOC) as $s) {
+                $pid = (int)$s['product_id'];
+                if (!isset($sold_map[$pid])) {
+                    $sold_map[$pid] = ['qty' => 0, 'batch' => $s['batch_no'], 'price' => (float)$s['unit_price']];
+                }
+                $sold_map[$pid]['qty'] += (int)$s['quantity'];
+                $sold_map[$pid]['price'] = (float)$s['unit_price'];
+                if (empty($sold_map[$pid]['batch']) && !empty($s['batch_no'])) {
+                    $sold_map[$pid]['batch'] = $s['batch_no'];
+                }
+            }
+
+            $total_return_amount = 0;
+            $validated = [];
+
+            foreach ($items as $itm) {
+                $pid       = intval($itm['product_id'] ?? 0);
+                $qty       = intval($itm['quantity'] ?? 0);
+                $price     = floatval($itm['unit_price'] ?? 0);
+                $condition = trim($itm['condition'] ?? 'Good / Resalable');
+
+                if ($pid <= 0 || $qty <= 0 || !isset($sold_map[$pid])) continue;
+
+                $returnable = max(0, (int)$sold_map[$pid]['qty'] - ($ret_map[$pid] ?? 0));
+                if ($qty > $returnable) $qty = $returnable;
+                if ($qty <= 0) continue;
+                if ($price <= 0) $price = (float)$sold_map[$pid]['price'];
+
+                $line = round($qty * $price, 2);
+                $total_return_amount += $line;
+
+                $validated[] = [
+                    'product_id' => $pid,
+                    'quantity'   => $qty,
+                    'price'      => $price,
+                    'total'      => $line,
+                    'condition'  => $condition,
+                    'batch_no'   => $sold_map[$pid]['batch'] ?? null
+                ];
+            }
+
+            if (empty($validated)) {
+                throw new Exception("No valid return quantities entered (items may already be fully returned).");
+            }
+
+            // Fallback return number if not supplied
+            if ($return_no === '') {
+                $return_no = $auto_return_no;
+            }
+
+            $user_id = $_SESSION['user_id'] ?? 1;
+
+            // Link return to the invoice (sale_id kept equal to invoice_id for legacy net-sale joins)
+            $stmt_ret = $pdo->prepare("
+                INSERT INTO sale_returns (
+                    return_no, sale_id, invoice_id, return_date, customer_id, refund_type,
+                    total_amount, deduction_amount, net_refund_amount, reason, cash_account_id, bank_account_id, status, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0.00, ?, ?, ?, ?, 'Completed', ?)
+            ");
+            $stmt_ret->execute([
+                $return_no, $invoice_id, $invoice_id, $return_date, $customer_id, $refund_type,
+                $total_return_amount, $total_return_amount, $reason, $cash_account_id, $bank_account_id, $user_id
+            ]);
+            $return_id = $pdo->lastInsertId();
+
+            $stmt_item = $pdo->prepare("
+                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, batch_no, quantity, unit_price, total_price, `condition`)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
+            $stmt_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE product_id = ? AND batch_no = ?");
+
+            foreach ($validated as $vi) {
+                $stmt_item->execute([
+                    $return_id, $return_id, $vi['product_id'],
+                    !empty($vi['batch_no']) ? $vi['batch_no'] : null,
+                    $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']
+                ]);
+
+                if ($vi['condition'] === 'Good / Resalable' || $vi['condition'] === 'Good') {
+                    $stmt_stock->execute([$vi['quantity'], $vi['product_id']]);
+                    if (!empty($vi['batch_no'])) {
+                        try { $stmt_batch->execute([$vi['quantity'], $vi['product_id'], $vi['batch_no']]); } catch (Exception $e) {}
+                    }
+                }
+            }
+
+            // Settle refund: cash / bank accounts
+            if ($refund_type === 'Cash Refund' && $cash_account_id) {
+                $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
+            } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
+                $pdo->prepare("UPDATE bank_accounts SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
+            }
+            // 'Credit Note' customer-balance reduction is handled by updateCustomerBalance() below.
+
+            $pdo->commit();
+
+            // Recompute customer ledger (Credit Note returns are included automatically)
+            if (function_exists('updateCustomerBalance')) {
+                try { updateCustomerBalance($pdo, $customer_id); } catch (Exception $e) {}
+            }
+
+            $_SESSION['flash_message'] = "Invoice refund #{$return_no} saved successfully and stock restored! <a href='print_return.php?id={$return_id}' target='_blank' class='fw-bold text-dark text-decoration-underline ms-2'><i class='fa-solid fa-print'></i> Print Voucher</a>";
+            $_SESSION['flash_type'] = "success";
+            header("Location: sale_return.php");
+            exit;
+
+        } catch (Exception $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            $message = "Error: " . $e->getMessage();
+            $msg_type = "danger";
+        }
+    }
+}
+
 // Search & Date Filter Parameters
 $search    = trim($_GET['search'] ?? '');
 $date_from = trim($_GET['date_from'] ?? '');
@@ -266,16 +546,25 @@ $where_clauses = ["1=1"];
 $params = [];
 
 if ($search !== '') {
-    $where_clauses[] = "(sr.return_no LIKE :s1 OR sr.reason LIKE :s2 OR c.name LIKE :s3 OR c.shop_name LIKE :s4 OR sr.id IN (
-        SELECT sri_sub.return_id FROM sale_return_items sri_sub 
-        JOIN products p_sub ON p_sub.id = sri_sub.product_id 
-        WHERE p_sub.name LIKE :s5 OR p_sub.product_code LIKE :s6
-    ))";
+    $where_clauses[] = "(sr.return_no LIKE :s1 
+        OR sr.reason LIKE :s2 
+        OR c.name LIKE :s3 
+        OR c.shop_name LIKE :s4 
+        OR CONCAT_WS(' ', c.shop_name, c.name) LIKE :s_cust1
+        OR CONCAT_WS(' ', c.name, c.shop_name) LIKE :s_cust2
+        OR sr.id IN (
+            SELECT sri_sub.return_id FROM sale_return_items sri_sub 
+            JOIN products p_sub ON p_sub.id = sri_sub.product_id 
+            WHERE p_sub.name LIKE :s5 OR p_sub.product_code LIKE :s6
+        )
+    )";
     $like = "%$search%";
     $params[':s1'] = $like;
     $params[':s2'] = $like;
     $params[':s3'] = $like;
     $params[':s4'] = $like;
+    $params[':s_cust1'] = $like;
+    $params[':s_cust2'] = $like;
     $params[':s5'] = $like;
     $params[':s6'] = $like;
 }
@@ -343,6 +632,17 @@ if ($db_connected && $pdo) {
 }
 
 $total_pages = ceil($total_records / $per_page);
+
+// If user searched for a customer who has no return records yet, find them in customers table
+$matched_customer = null;
+if (!empty($search) && empty($all_returns) && $db_connected && $pdo) {
+    try {
+        $stmt_mc = $pdo->prepare("SELECT id, name, shop_name, phone FROM customers WHERE (status = 'Active' OR status IS NULL OR status = '') AND (name LIKE :s1 OR shop_name LIKE :s2 OR CONCAT_WS(' ', shop_name, name) LIKE :s3 OR CONCAT_WS(' ', name, shop_name) LIKE :s4) LIMIT 1");
+        $like_s = "%$search%";
+        $stmt_mc->execute([':s1' => $like_s, ':s2' => $like_s, ':s3' => $like_s, ':s4' => $like_s]);
+        $matched_customer = $stmt_mc->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $e) {}
+}
 
 require_once __DIR__ . '/../../includes/header.php';
 ?>
@@ -419,6 +719,50 @@ require_once __DIR__ . '/../../includes/header.php';
         background: #fee2e2;
         border-left: 4px solid #dc2626;
     }
+
+    /* Refund by Invoice Modal: Ensure dialog fits screen and footer with Save button is always visible */
+    #refundInvoiceModal .modal-dialog {
+        max-height: calc(100vh - 2rem);
+        margin-top: 1rem;
+        margin-bottom: 1rem;
+    }
+    #refundInvoiceModal .modal-content,
+    #refundInvoiceModal form.modal-content {
+        max-height: calc(100vh - 2rem);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+    #refundInvoiceModal .modal-body {
+        overflow-y: auto;
+        flex: 1 1 auto;
+    }
+    #refundInvoiceModal .modal-footer {
+        flex-shrink: 0;
+        background-color: #f8fafc;
+        border-top: 1px solid #e2e8f0;
+    }
+
+    /* Refund by Invoice Modal: Items Scrollable Container & Sticky Header/Footer */
+    #rifItemsWrapper .table-responsive {
+        max-height: 240px;
+        overflow-y: auto;
+        overflow-x: auto;
+    }
+    #rifItemsWrapper .table-responsive thead th {
+        position: sticky;
+        top: 0;
+        background-color: #f8fafc;
+        z-index: 3;
+        box-shadow: inset 0 -1px 0 #dee2e6;
+    }
+    #rifItemsWrapper .table-responsive tfoot td {
+        position: sticky;
+        bottom: 0;
+        background-color: #f8fafc;
+        z-index: 3;
+        box-shadow: inset 0 1px 0 #dee2e6;
+    }
 </style>
 
 <!-- Top Action Bar (Matching sales.php layout, no duplicate heading) -->
@@ -427,6 +771,9 @@ require_once __DIR__ . '/../../includes/header.php';
         <a href="sales.php" class="btn btn-sm btn-outline-secondary bg-white shadow-sm px-3 rounded-2">
             <i class="fa-solid fa-receipt me-1"></i> Sales Invoices
         </a>
+        <button type="button" class="btn btn-sm btn-success fw-bold shadow-sm px-3 rounded-2" onclick="openRefundInvoice(0, '', '')">
+            <i class="fa-solid fa-file-invoice-dollar me-1"></i> Refund by Invoice
+        </button>
     </div>
 </div>
 
@@ -463,10 +810,13 @@ require_once __DIR__ . '/../../includes/header.php';
             </div>
         </form>
 
-        <!-- Right Side: Single "New Return" Button -->
-        <div>
+        <!-- Right Side: Action Buttons -->
+        <div class="d-flex align-items-center gap-2">
+            <button type="button" class="btn btn-sm btn-success fw-bold shadow-sm px-3 rounded-2" onclick="openRefundInvoice(0, '', '')">
+                <i class="fa-solid fa-file-invoice-dollar me-1"></i> Refund by Invoice
+            </button>
             <button type="button" class="btn btn-sm btn-danger fw-semibold shadow-sm px-3 rounded-2" data-toggle="modal" data-target="#addSaleReturnModal" data-bs-toggle="modal" data-bs-target="#addSaleReturnModal">
-                <i class="fa-solid fa-plus me-1"></i> New Return
+                <i class="fa-solid fa-plus me-1"></i> new Return
             </button>
         </div>
     </div>
@@ -489,13 +839,36 @@ require_once __DIR__ . '/../../includes/header.php';
                 <?php if (empty($all_returns)): ?>
                     <tr>
                         <td colspan="7" class="text-center py-5 text-muted">
-                            <i class="fa-solid fa-box-open fs-2 mb-2 d-block text-secondary"></i>
-                            No Sales Return records found.
-                            <div class="mt-2">
-                                <button type="button" class="btn btn-sm btn-danger fw-semibold" data-toggle="modal" data-target="#addSaleReturnModal" data-bs-toggle="modal" data-bs-target="#addSaleReturnModal">
-                                    <i class="fa-solid fa-plus me-1"></i> Create Sale Return
-                                </button>
-                            </div>
+                            <?php if ($matched_customer): ?>
+                                <div class="py-3 px-4 d-inline-block bg-light border border-success-subtle rounded-3 text-start" style="max-width: 600px;">
+                                    <div class="d-flex align-items-center gap-3 mb-2">
+                                        <div class="bg-success text-white rounded-circle d-flex align-items-center justify-content-center" style="width: 44px; height: 44px;">
+                                            <i class="fa-solid fa-file-invoice-dollar fs-5"></i>
+                                        </div>
+                                        <div>
+                                            <h6 class="fw-bold text-dark mb-0"><?= htmlspecialchars($matched_customer['shop_name'] ? $matched_customer['shop_name'] . ' (' . $matched_customer['name'] . ')' : $matched_customer['name']) ?></h6>
+                                            <small class="text-muted">Customer is active in system, but has <strong>no previous Sales Return records</strong>.</small>
+                                        </div>
+                                    </div>
+                                    <p class="small text-secondary mb-3">
+                                        You can refund this customer's sales invoices directly by clicking below:
+                                    </p>
+                                    <button type="button" class="btn btn-sm btn-success fw-bold px-3 shadow-sm" onclick="openRefundInvoice(<?= intval($matched_customer['id']) ?>, '<?= htmlspecialchars(addslashes($matched_customer['name'])) ?>', '<?= htmlspecialchars(addslashes($matched_customer['shop_name'])) ?>')">
+                                        <i class="fa-solid fa-file-invoice-dollar me-1"></i> Create Refund for <?= htmlspecialchars($matched_customer['shop_name'] ?: $matched_customer['name']) ?>
+                                    </button>
+                                </div>
+                            <?php else: ?>
+                                <i class="fa-solid fa-box-open fs-2 mb-2 d-block text-secondary"></i>
+                                No Sales Return records found<?= $search !== '' ? ' for "' . htmlspecialchars($search) . '"' : '' ?>.
+                                <div class="mt-3 d-flex justify-content-center gap-2">
+                                    <button type="button" class="btn btn-sm btn-success fw-bold px-3 shadow-sm" onclick="openRefundInvoice(0, '', '')">
+                                        <i class="fa-solid fa-file-invoice-dollar me-1"></i> Refund by Invoice
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger fw-semibold px-3" data-toggle="modal" data-target="#addSaleReturnModal" data-bs-toggle="modal" data-bs-target="#addSaleReturnModal">
+                                        <i class="fa-solid fa-plus me-1"></i> Direct Return
+                                    </button>
+                                </div>
+                            <?php endif; ?>
                         </td>
                     </tr>
                 <?php else: ?>
@@ -546,6 +919,12 @@ require_once __DIR__ . '/../../includes/header.php';
 
                             <!-- Action Column -->
                             <td class="text-center text-nowrap">
+                                <button type="button"
+                                        class="btn btn-danger btn-sm action-btn border"
+                                        title="Refund by Invoice"
+                                        onclick="openRefundInvoice(<?= intval($rr['customer_id'] ?? 0) ?>, '<?= htmlspecialchars(addslashes($rr['cust_name'] ?? '')) ?>', '<?= htmlspecialchars(addslashes($rr['cust_shop'] ?? '')) ?>')">
+                                    <i class="fa-solid fa-file-invoice-dollar"></i>
+                                </button>
                                 <button type="button" 
                                         class="btn btn-light btn-sm action-btn text-info border" 
                                         title="View Returned Products"
@@ -733,6 +1112,142 @@ require_once __DIR__ . '/../../includes/header.php';
             </form>
 
         </div>
+    </div>
+</div>
+
+<!-- ======================================================== -->
+<!-- MODAL: REFUND BY INVOICE (INVOICE-BASED RETURN)          -->
+<!-- ======================================================== -->
+<div class="modal fade" id="refundInvoiceModal" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable" role="document">
+        <form action="sale_return.php" method="POST" id="refundInvoiceForm" class="modal-content border-0 shadow-lg rounded-3">
+                <input type="hidden" name="invoice_id" id="rif_invoice_id" value="">
+                <input type="hidden" name="customer_id" id="rif_customer_id" value="">
+                <input type="hidden" name="return_no" value="<?= htmlspecialchars($auto_return_no) ?>">
+
+                <!-- Modal Header -->
+                <div class="modal-header bg-success text-white py-3 px-4">
+                    <div class="d-flex align-items-center gap-2">
+                        <i class="fa-solid fa-file-invoice-dollar fs-5"></i>
+                        <h5 class="modal-title fw-bold mb-0">Refund by Invoice</h5>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white ms-auto" data-dismiss="modal" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+
+                <!-- Modal Body -->
+                <div class="modal-body p-4">
+
+                    <!-- Step 1: Customer -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-8">
+                            <label class="form-label small fw-bold text-muted mb-1">Customer <span class="text-danger">*</span></label>
+                            <div class="product-search-box">
+                                <input type="text" id="rifCustomerSearch" class="form-control fw-semibold" placeholder="Search customer by name / shop / phone..." autocomplete="off">
+                                <div id="rifCustomerDropdown" class="product-results-dropdown d-none"></div>
+                            </div>
+                            <div id="rifSelectedCustomer" class="small text-success fw-semibold mt-1"></div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-bold text-muted mb-1">Return Date <span class="text-danger">*</span></label>
+                            <input type="date" name="return_date" class="form-control fw-semibold" value="<?= date('Y-m-d') ?>" required>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Invoices -->
+                    <div class="mb-3">
+                        <label class="form-label small fw-bold text-muted mb-1">Select Invoice</label>
+                        <div id="rifInvoiceList" class="border rounded-3" style="max-height: 150px; overflow-y: auto;">
+                            <div class="p-3 text-muted small">Select a customer to view their invoices.</div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Items -->
+                    <div id="rifItemsWrapper" class="d-none">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="fw-bold text-dark"><i class="fa-solid fa-pills me-1 text-success"></i> Invoice Items</div>
+                            <button type="button" class="btn btn-sm btn-outline-success fw-semibold" onclick="rifSelectAllFull()">
+                                <i class="fa-solid fa-check-double me-1"></i> Return Full Invoice
+                            </button>
+                        </div>
+                        <div class="table-responsive border rounded-3" style="max-height: 240px; overflow-y: auto;">
+                            <table class="table mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Medicine</th>
+                                        <th class="text-center" style="width: 80px;">Sold</th>
+                                        <th class="text-center" style="width: 90px;">Returned</th>
+                                        <th class="text-center" style="width: 120px;">Return Qty</th>
+                                        <th class="text-end" style="width: 120px;">Rate</th>
+                                        <th class="text-end" style="width: 130px;">Amount</th>
+                                        <th style="width: 170px;">Condition</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="rifItemsBody"></tbody>
+                                <tfoot class="table-light fw-bold">
+                                    <tr>
+                                        <td colspan="5" class="text-end">Grand Refund Total:</td>
+                                        <td class="text-end text-danger font-monospace fs-6" id="rifGrandTotal">Rs. 0.00</td>
+                                        <td></td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Settlement -->
+                    <div class="row g-3 pt-3 mt-2 border-top">
+                        <div class="col-md-7">
+                            <label class="form-label small fw-bold text-muted mb-1">Remarks / Reason</label>
+                            <textarea name="reason" class="form-control" rows="3" placeholder="Enter reason: e.g. Customer returned goods, expired batch, wrong item..."></textarea>
+                        </div>
+                        <div class="col-md-5">
+                            <div class="p-3 border rounded-3 bg-light">
+                                <div class="mb-3">
+                                    <label class="form-label small fw-bold text-muted mb-1">Refund Method</label>
+                                    <select name="refund_type" id="rifRefundType" class="form-select fw-semibold" onchange="rifToggleAccounts()">
+                                        <option value="Credit Note">Deduct Customer Balance (Credit Note)</option>
+                                        <option value="Cash Refund">Cash Refund (Pay from Cash Account)</option>
+                                        <option value="Bank Refund">Bank Transfer Refund</option>
+                                        <option value="Direct Restock">Stock Restock Only (No Money)</option>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3 d-none" id="rifCashBox">
+                                    <label class="form-label small fw-bold text-muted mb-1">Cash Account</label>
+                                    <select name="cash_account_id" class="form-select">
+                                        <?php foreach ($cash_accounts as $ca): ?>
+                                            <option value="<?= $ca['id'] ?>"><?= htmlspecialchars($ca['account_name']) ?> (Bal: Rs. <?= number_format($ca['balance'], 2) ?>)</option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3 d-none" id="rifBankBox">
+                                    <label class="form-label small fw-bold text-muted mb-1">Bank Account</label>
+                                    <select name="bank_account_id" class="form-select">
+                                        <?php foreach ($bank_accounts as $ba): ?>
+                                            <option value="<?= $ba['id'] ?>"><?= htmlspecialchars($ba['bank_name']) ?> (<?= htmlspecialchars($ba['account_title']) ?>)</option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="d-flex justify-content-between align-items-center pt-2 border-top">
+                                    <span class="fw-bold text-dark fs-6">Grand Refund Total:</span>
+                                    <span class="fw-bold text-danger fs-5 font-monospace" id="rifGrandTotal2">Rs. 0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Modal Footer -->
+                <div class="modal-footer bg-light px-4 py-3">
+                    <button type="button" class="btn btn-outline-secondary px-4 fw-semibold" data-dismiss="modal" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" name="save_invoice_return" id="rifSaveBtn" class="btn btn-success px-4 fw-bold shadow-sm">
+                        <i class="fa-solid fa-check me-1"></i> Save Refund
+                    </button>
+                </div>
+        </form>
     </div>
 </div>
 
@@ -1170,6 +1685,285 @@ require_once __DIR__ . '/../../includes/header.php';
             });
         }
     });
+
+    // ============================================================
+    // REFUND BY INVOICE
+    // ============================================================
+    function openRefundInvoice(customerId, custName, custShop) {
+        const form = document.getElementById('refundInvoiceForm');
+        if (form) form.reset();
+
+        document.getElementById('rif_invoice_id').value = '';
+        document.getElementById('rif_customer_id').value = customerId > 0 ? customerId : '';
+        document.getElementById('rifSelectedCustomer').textContent = '';
+        document.getElementById('rifInvoiceList').innerHTML = '<div class="p-3 text-muted small">Select a customer to view their invoices.</div>';
+        document.getElementById('rifItemsWrapper').classList.add('d-none');
+        document.getElementById('rifItemsBody').innerHTML = '';
+        rifRecalc();
+        rifToggleAccounts();
+
+        const label = custShop ? (custShop + ' (' + custName + ')') : custName;
+        if (customerId > 0) {
+            document.getElementById('rifCustomerSearch').value = label;
+            document.getElementById('rifSelectedCustomer').textContent = 'Selected: ' + label;
+            loadCustomerInvoices(customerId);
+        } else {
+            document.getElementById('rifCustomerSearch').value = '';
+        }
+
+        const modalEl = document.getElementById('refundInvoiceModal');
+        if (window.bootstrap && window.bootstrap.Modal) {
+            new bootstrap.Modal(modalEl).show();
+        } else if (window.jQuery && $(modalEl).modal) {
+            $(modalEl).modal('show');
+        }
+    }
+
+    function rifToggleAccounts() {
+        const typeSelect = document.getElementById('rifRefundType');
+        if (!typeSelect) return;
+        const type = typeSelect.value;
+        const cBox = document.getElementById('rifCashBox');
+        const bBox = document.getElementById('rifBankBox');
+        if (cBox) cBox.classList.add('d-none');
+        if (bBox) bBox.classList.add('d-none');
+        if (type === 'Cash Refund' && cBox) cBox.classList.remove('d-none');
+        if (type === 'Bank Refund' && bBox) bBox.classList.remove('d-none');
+    }
+
+    let rifSearchTimeout = null;
+    function rifSearchCustomers(query) {
+        const dd = document.getElementById('rifCustomerDropdown');
+        if (!dd) return;
+        fetch('sale_return.php?action=search_customer&q=' + encodeURIComponent(query))
+            .then(res => res.json())
+            .then(data => {
+                dd.innerHTML = '';
+                if (!data || data.length === 0) {
+                    dd.innerHTML = '<div class="p-3 text-muted text-center small">No customers found.</div>';
+                    dd.classList.remove('d-none');
+                    return;
+                }
+                data.forEach(c => {
+                    const item = document.createElement('div');
+                    item.className = 'product-search-item';
+                    const label = c.shop_name ? (c.shop_name + ' (' + c.name + ')') : c.name;
+                    item.innerHTML = `
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong class="text-dark d-block">${escapeHtml(label)}</strong>
+                                <small class="text-muted">${escapeHtml(c.phone || '')}</small>
+                            </div>
+                            <span class="badge bg-light text-secondary border font-monospace">Bal: Rs. ${parseFloat(c.current_balance || 0).toFixed(2)}</span>
+                        </div>`;
+                    item.addEventListener('click', () => {
+                        document.getElementById('rif_customer_id').value = c.id;
+                        document.getElementById('rifCustomerSearch').value = label;
+                        document.getElementById('rifSelectedCustomer').textContent = 'Selected: ' + label;
+                        dd.classList.add('d-none');
+                        loadCustomerInvoices(c.id);
+                    });
+                    dd.appendChild(item);
+                });
+                dd.classList.remove('d-none');
+            })
+            .catch(() => {});
+    }
+
+    function loadCustomerInvoices(customerId) {
+        document.getElementById('rif_invoice_id').value = '';
+        document.getElementById('rifItemsWrapper').classList.add('d-none');
+        document.getElementById('rifItemsBody').innerHTML = '';
+        rifRecalc();
+
+        const box = document.getElementById('rifInvoiceList');
+        box.innerHTML = '<div class="p-3 text-muted small"><i class="fa-solid fa-spinner fa-spin me-1"></i> Loading invoices...</div>';
+
+        fetch('sale_return.php?action=customer_invoices&customer_id=' + encodeURIComponent(customerId))
+            .then(res => res.json())
+            .then(list => {
+                if (!list || list.length === 0) {
+                    box.innerHTML = '<div class="p-3 text-muted small">No invoices found for this customer.</div>';
+                    return;
+                }
+                box.innerHTML = '';
+                list.forEach(inv => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'btn btn-sm w-100 text-start border-bottom rounded-0 py-2';
+                    btn.innerHTML = `
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>
+                                <strong class="text-danger font-monospace">${escapeHtml(inv.invoice_no)}</strong>
+                                <small class="text-muted ms-2">${escapeHtml(inv.invoice_date)}</small>
+                            </span>
+                            <span class="small">
+                                <span class="badge bg-light text-secondary border me-2">${parseInt(inv.item_count) || 0} items</span>
+                                <strong class="font-monospace text-dark">Rs. ${parseFloat(inv.grand_total || 0).toFixed(2)}</strong>
+                            </span>
+                        </div>`;
+                    btn.addEventListener('click', () => selectRifInvoice(inv.id, btn));
+                    box.appendChild(btn);
+                });
+            })
+            .catch(() => {
+                box.innerHTML = '<div class="p-3 text-danger small">Failed to load invoices.</div>';
+            });
+    }
+
+    function selectRifInvoice(invoiceId, btn) {
+        document.querySelectorAll('#rifInvoiceList .btn').forEach(b => b.classList.remove('active', 'bg-light'));
+        if (btn) btn.classList.add('active', 'bg-light');
+        document.getElementById('rif_invoice_id').value = invoiceId;
+        loadInvoiceItems(invoiceId);
+    }
+
+    function loadInvoiceItems(invoiceId) {
+        const wrap = document.getElementById('rifItemsWrapper');
+        const body = document.getElementById('rifItemsBody');
+        wrap.classList.remove('d-none');
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3"><i class="fa-solid fa-spinner fa-spin me-1"></i> Loading items...</td></tr>';
+
+        fetch('sale_return.php?action=invoice_details&invoice_id=' + encodeURIComponent(invoiceId))
+            .then(res => res.json())
+            .then(data => {
+                body.innerHTML = '';
+                const items = (data && data.items) ? data.items : [];
+                if (items.length === 0) {
+                    body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">No items found in this invoice.</td></tr>';
+                    rifRecalc();
+                    return;
+                }
+                items.forEach((it, idx) => {
+                    const returnable = parseInt(it.returnable_qty) || 0;
+                    const price = parseFloat(it.unit_price) || 0;
+                    const disabled = returnable <= 0;
+                    const initQty = disabled ? 0 : returnable;
+
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>
+                            <strong class="text-dark d-block">${escapeHtml(it.product_name || it.item_name || 'Medicine')}</strong>
+                            <small class="text-muted">${escapeHtml(it.product_code || '')} ${it.batch_no ? '&bull; Batch: ' + escapeHtml(it.batch_no) : ''}</small>
+                            <input type="hidden" name="inv_items[${idx}][product_id]" value="${it.product_id}">
+                            <input type="hidden" name="inv_items[${idx}][unit_price]" value="${price}">
+                        </td>
+                        <td class="text-center font-monospace">${parseInt(it.sold_qty) || 0}</td>
+                        <td class="text-center font-monospace text-muted">${parseInt(it.returned_qty) || 0}</td>
+                        <td class="text-center">
+                            <input type="number"
+                                   name="inv_items[${idx}][quantity]"
+                                   class="form-control form-control-sm text-center fw-bold text-success rif-qty"
+                                   value="${initQty}" min="0" max="${returnable}"
+                                   data-price="${price}"
+                                   ${disabled ? 'disabled' : ''}
+                                   oninput="rifCalcRow(this)">
+                        </td>
+                        <td class="text-end font-monospace">Rs. ${price.toFixed(2)}</td>
+                        <td class="text-end font-monospace fw-bold rif-amount">Rs. ${(initQty * price).toFixed(2)}</td>
+                        <td>
+                            <select name="inv_items[${idx}][condition]" class="form-select form-select-sm">
+                                <option value="Good / Resalable">Good (Restock)</option>
+                                <option value="Damaged / Expiry Claim">Damaged / Expiry</option>
+                            </select>
+                        </td>`;
+                    body.appendChild(tr);
+                });
+                rifRecalc();
+            })
+            .catch(() => {
+                body.innerHTML = '<tr><td colspan="7" class="text-center text-danger py-3">Failed to load invoice items.</td></tr>';
+            });
+    }
+
+    function rifCalcRow(el) {
+        const tr = el.closest('tr');
+        if (!tr) return;
+        const max = parseInt(el.max) || 0;
+        let qty = parseInt(el.value) || 0;
+        if (qty < 0) qty = 0;
+        if (qty > max) { qty = max; el.value = max; }
+        const price = parseFloat(el.dataset.price) || 0;
+        const amountEl = tr.querySelector('.rif-amount');
+        if (amountEl) amountEl.textContent = 'Rs. ' + (qty * price).toFixed(2);
+        rifRecalc();
+    }
+
+    function rifRecalc() {
+        let grand = 0;
+        document.querySelectorAll('#rifItemsBody .rif-qty').forEach(inp => {
+            const qty = parseInt(inp.value) || 0;
+            const price = parseFloat(inp.dataset.price) || 0;
+            grand += qty * price;
+        });
+        const formatted = 'Rs. ' + grand.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const el1 = document.getElementById('rifGrandTotal');
+        const el2 = document.getElementById('rifGrandTotal2');
+        if (el1) el1.textContent = formatted;
+        if (el2) el2.textContent = formatted;
+    }
+
+    function rifSelectAllFull() {
+        document.querySelectorAll('#rifItemsBody .rif-qty').forEach(inp => {
+            if (inp.disabled) return;
+            inp.value = parseInt(inp.max) || 0;
+            const tr = inp.closest('tr');
+            const price = parseFloat(inp.dataset.price) || 0;
+            const amountEl = tr ? tr.querySelector('.rif-amount') : null;
+            if (amountEl) amountEl.textContent = 'Rs. ' + ((parseInt(inp.value) || 0) * price).toFixed(2);
+        });
+        rifRecalc();
+    }
+
+    // Wire up refund-modal interactions
+    (function() {
+        const rifSearch = document.getElementById('rifCustomerSearch');
+        const rifDrop = document.getElementById('rifCustomerDropdown');
+        if (rifSearch) {
+            rifSearch.addEventListener('input', function() {
+                clearTimeout(rifSearchTimeout);
+                const q = this.value.trim();
+                rifSearchTimeout = setTimeout(() => rifSearchCustomers(q), 150);
+            });
+            rifSearch.addEventListener('focus', function() {
+                if (!document.getElementById('rif_customer_id').value) {
+                    rifSearchCustomers(this.value.trim());
+                }
+            });
+        }
+        document.addEventListener('click', function(e) {
+            if (rifDrop && !rifDrop.contains(e.target) && e.target !== rifSearch) {
+                rifDrop.classList.add('d-none');
+            }
+        });
+
+        const rifForm = document.getElementById('refundInvoiceForm');
+        if (rifForm) {
+            rifForm.addEventListener('submit', function(e) {
+                const invoiceId = parseInt(document.getElementById('rif_invoice_id').value) || 0;
+                const customerId = parseInt(document.getElementById('rif_customer_id').value) || 0;
+                if (customerId <= 0) {
+                    e.preventDefault();
+                    alert('Please select a customer.');
+                    return false;
+                }
+                if (invoiceId <= 0) {
+                    e.preventDefault();
+                    alert('Please select an invoice to refund.');
+                    return false;
+                }
+                let totalQty = 0;
+                document.querySelectorAll('#rifItemsBody .rif-qty').forEach(inp => {
+                    totalQty += (parseInt(inp.value) || 0);
+                });
+                if (totalQty <= 0) {
+                    e.preventDefault();
+                    alert('Please enter a return quantity of 1 or more for at least one product.');
+                    return false;
+                }
+            });
+        }
+    })();
 </script>
 
 <?php require_once __DIR__ . '/../../includes/footer.php'; ?>

@@ -2737,7 +2737,7 @@ CREATE TABLE `sale_returns` (
   `sale_id` int DEFAULT NULL,
   `invoice_id` int DEFAULT NULL,
   `return_date` date NOT NULL,
-  `customer_id` int NOT NULL,
+  `customer_id` int DEFAULT NULL,
   `refund_type` varchar(50) COLLATE utf8mb4_general_ci DEFAULT 'Credit Note',
   `total_amount` decimal(14,2) NOT NULL DEFAULT '0.00',
   `deduction_amount` decimal(12,2) DEFAULT '0.00',

@@ -1611,8 +1611,8 @@ function calculateRowTotal(rowId) {
     // Bonus value + combined discount benefit
     const bonusValue = parseFloat((bonus * cost).toFixed(2));
     const discountBenefit = parseFloat((discAmt + bonusValue).toFixed(2));
-    const totalValue = totalQty * cost;
-    const benefitPct = totalValue > 0 ? (discountBenefit / totalValue * 100) : 0;
+    // Calculate benefit percentage based on purchased quantity (qty * cost)
+    const benefitPct = gross > 0 ? (discountBenefit / gross * 100) : 0;
 
     if (discAmtEl) discAmtEl.value = discAmt.toFixed(2);
     if (taxAmtEl) taxAmtEl.value = taxAmt.toFixed(2);
@@ -1642,13 +1642,13 @@ function calculateRowTotal(rowId) {
         }
     }
 
-    // Update row-level TP Discount Received (%)
-    const rawCost = parseFloat(costEl.value) || 0;
-    const effectiveCost = getRowEffectiveCost(rowId);
-    const allDiscPct = (rawCost > 0 && rawCost >= effectiveCost) ? (((rawCost - effectiveCost) / rawCost) * 100) : 0;
+    // Update row-level Total Benefit % (based on purchased quantity)
+    const allDiscPct = benefitPct;
     
     const rowAllDiscInput = document.getElementById('rowAllDiscPct_' + rowId);
     if (rowAllDiscInput) rowAllDiscInput.value = allDiscPct.toFixed(2);
+
+    const effectiveCost = getRowEffectiveCost(rowId);
 
     const effCostDisp = document.getElementById('effectiveCostDisp_' + rowId);
     if (effCostDisp) effCostDisp.textContent = 'Cost: ' + effectiveCost.toFixed(2);
@@ -1749,17 +1749,39 @@ function calculateBillTotals() {
     document.getElementById('hiddenGrandTotal').value    = grandTotal.toFixed(2);
     document.getElementById('hiddenBalanceAmount').value = balanceDue.toFixed(2);
 
-    // Update TP Discount Received for all rows in case bill discount changed
+    // Update Total Benefit % for all rows
     rows.forEach(tr => {
         const rId = tr.id.replace('row_', '');
         const cInput = document.getElementById('cost_' + rId);
-        const rCost = parseFloat(cInput ? cInput.value : 0) || 0;
+        const qInput = document.getElementById('qty_' + rId);
+        const bInput = document.getElementById('bonusQty_' + rId);
+        const dInput = document.getElementById('discPct_' + rId);
+
+        const rCost   = parseFloat(cInput ? cInput.value : 0) || 0;
+        const rQty    = parseFloat(qInput ? qInput.value : 0) || 0;
+        const rBonus  = parseFloat(bInput ? bInput.value : 0) || 0;
+        const rDisc   = parseFloat(dInput ? dInput.value : 0) || 0;
         const effCost = getRowEffectiveCost(rId);
-        const allPct = (rCost > 0 && rCost >= effCost) ? (((rCost - effCost) / rCost) * 100) : 0;
+
+        const rGross      = rQty * rCost;
+        const rDiscAmt    = parseFloat((rGross * (rDisc / 100)).toFixed(2));
+        const rBonusValue = parseFloat((rBonus * rCost).toFixed(2));
+        const rBenefit    = parseFloat((rDiscAmt + rBonusValue).toFixed(2));
+        const rBenefitPct = rGross > 0 ? (rBenefit / rGross * 100) : 0;
+
         const radInput = document.getElementById('rowAllDiscPct_' + rId);
-        if (radInput) radInput.value = allPct.toFixed(2);
+        if (radInput) radInput.value = rBenefitPct.toFixed(2);
         const ecDisp = document.getElementById('effectiveCostDisp_' + rId);
         if (ecDisp) ecDisp.textContent = 'Cost: ' + effCost.toFixed(2);
+
+        const discDisplay = document.getElementById('discDisplay_' + rId);
+        if (discDisplay) {
+            if (rBenefit > 0) {
+                discDisplay.innerHTML = `<span class="text-danger font-weight-bold" title="Total Benefit (Disc + Free Bonus Goods)">Benefit: ${rBenefit.toFixed(2)} (${rBenefitPct.toFixed(1)}%)</span>`;
+            } else {
+                discDisplay.innerHTML = '';
+            }
+        }
     });
 }
 
