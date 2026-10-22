@@ -12,7 +12,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
     $res = [];
     if ($db_connected && $pdo) {
         $sql = "SELECT p.id, p.product_code, p.name, p.generic_name, p.trade_price, p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, c.name as company_name, 
-                COALESCE(NULLIF(p.discount_percent, 0), (SELECT pi.sale_discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.sale_discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent > 0 ORDER BY pi.id DESC LIMIT 1), 0) as discount_percent 
+                p.discount_percent
                 FROM products p 
                 LEFT JOIN companies c ON c.id = p.company_id 
                 WHERE p.status = 'Active'";
@@ -63,7 +63,8 @@ if ($db_connected && $pdo) {
         $customers = $pdo->query("SELECT id, name, shop_name, phone, route_id, current_balance FROM customers WHERE status = 'Active' ORDER BY shop_name ASC, name ASC")->fetchAll(PDO::FETCH_ASSOC);
         
         $stmt_init_p = $pdo->query("
-            SELECT p.id, p.product_code, p.name, p.generic_name, p.trade_price, p.retail_price, p.current_stock, p.stock_unit, p.packs_per_box, c.name as company_name 
+            SELECT p.id, p.product_code, p.name, p.generic_name, p.trade_price, p.retail_price, p.purchase_price, p.current_stock, p.stock_unit, p.packs_per_box, c.name as company_name,
+                   p.discount_percent as discount_percent
             FROM products p 
             LEFT JOIN companies c ON c.id = p.company_id 
             WHERE p.status = 'Active' 
@@ -95,6 +96,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         $payment_method  = $payment_mode;
     }
     $notes = trim($_POST['notes'] ?? '');
+    $existing_order_discount = 0.0;
+    $discount_stmt = $conn->prepare("SELECT discount_percent FROM sales_invoices WHERE id = ?");
+    $discount_stmt->bind_param("i", $id);
+    $discount_stmt->execute();
+    $discount_stmt->bind_result($existing_order_discount);
+    $discount_stmt->fetch();
+    $discount_stmt->close();
 
     $booker_id   = !empty($_POST['booker_id']) ? intval($_POST['booker_id']) : null;
     $booker_name = trim($_POST['booker_name'] ?? '');
@@ -140,12 +148,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             }
 
             // STEP 1: Fetch old items and REVERT their quantities to stock
-            $old_items_stmt = $conn->prepare("SELECT product_id, quantity FROM sale_items WHERE invoice_id = ?");
+            $old_items_stmt = $conn->prepare("SELECT product_id, quantity, discount_percent FROM sale_items WHERE invoice_id = ?");
             $old_items_stmt->bind_param("i", $id);
             $old_items_stmt->execute();
             $old_res = $old_items_stmt->get_result();
             $old_items = $old_res->fetch_all(MYSQLI_ASSOC);
             $old_items_stmt->close();
+            $old_item_discounts = [];
+            foreach ($old_items as $old_item) {
+                $old_item_discounts[(int)$old_item['product_id']] = (float)$old_item['discount_percent'];
+            }
 
             if ($db_connected && $pdo) {
                 $stmt_restore = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
@@ -178,7 +190,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     throw new Exception("Row #" . ($i + 1) . ": Quantity must be at least 1.");
                 }
 
-                $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price FROM products WHERE id = ?");
+                $stmt_chk = $pdo->prepare("SELECT id, product_code, name, current_stock, trade_price, purchase_price,
+                    discount_percent as default_discount
+                    FROM products WHERE id = ?");
                 $stmt_chk->execute([$pid]);
                 $prod_row = $stmt_chk->fetch(PDO::FETCH_ASSOC);
 
@@ -194,6 +208,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 }
                 if ($qty > $avail_stock) {
                     throw new Exception("⚠️ Error: Product '{$p_name}' has only {$avail_stock} in stock, but entered quantity is {$qty}!");
+                }
+
+                if (!isAdmin()) {
+                    $disc = array_key_exists($pid, $old_item_discounts)
+                        ? max(0.0, min(100.0, $old_item_discounts[$pid]))
+                        : max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
+                } else {
+                    $disc = max(0.0, min(100.0, $disc));
                 }
 
                 $gross = $qty * $tp;
@@ -215,7 +237,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             // Calculations
             $items_net = $subtotal - $total_discount_cut;
-            $order_discount_percent = floatval($_POST['order_discount_percent'] ?? 0);
+            $order_discount_percent = isAdmin()
+                ? floatval($_POST['order_discount_percent'] ?? 0)
+                : max(0.0, min(100.0, (float)$existing_order_discount));
             $order_discount_amount  = $items_net * ($order_discount_percent / 100);
             $total_discount_cut    += $order_discount_amount;
 
@@ -739,7 +763,7 @@ $item_stmt->close();
                     <div class="calc-row">
                         <span class="calc-label">Order Discount (%)</span>
                         <div class="calc-input">
-                            <input type="number" step="0.01" min="0" max="100" name="order_discount_percent" id="orderDiscount" class="form-control text-right" placeholder="0.00" value="<?= floatval($invoice['discount_percent']) > 0 ? floatval($invoice['discount_percent']) : '' ?>" onfocus="this.select()">
+                            <input type="number" step="0.01" min="0" max="100" name="order_discount_percent" id="orderDiscount" class="form-control text-right" placeholder="0.00" value="<?= floatval($invoice['discount_percent']) > 0 ? floatval($invoice['discount_percent']) : '' ?>" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
                         </div>
                     </div>
 
@@ -850,7 +874,7 @@ $item_stmt->close();
                 <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control form-control-sm tp-input text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" required>
             </td>
             <td>
-                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control form-control-sm disc-input text-center" placeholder="0.00" value="" onfocus="this.select()">
+                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control form-control-sm disc-input text-center" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
             </td>
             <td>
                 <input type="text" class="form-control form-control-sm font-weight-bold row-net text-right text-dark bg-light" id="rowNet_${rowId}" placeholder="0.00" value="" readonly>
