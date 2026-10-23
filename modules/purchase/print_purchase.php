@@ -479,11 +479,13 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                 <tr>
                     <th style="width:28px;">#</th>
                     <th>Item / Medicine Description</th>
-                    <th style="width:65px;" class="text-center">Qty</th>
-                    <th style="width:170px;" class="text-center">Bonus, TP Disc & Sale Disc</th>
-                    <th style="width:90px;" class="text-end">TP Rate</th>
-                    <th style="width:90px;" class="text-end">Sale Rate</th>
-                    <th style="width:100px;" class="text-end">Total (Rs.)</th>
+                    <th style="width:90px;" class="text-center">Batch #</th>
+                    <th style="width:85px;" class="text-center">Expiry</th>
+                    <th style="width:60px;" class="text-center">Qty</th>
+                    <th style="width:160px;" class="text-center">Bonus, TP Disc & Sale Disc</th>
+                    <th style="width:85px;" class="text-end">TP Rate</th>
+                    <th style="width:85px;" class="text-end">Sale Rate</th>
+                    <th style="width:95px;" class="text-end">Total (Rs.)</th>
                 </tr>
             </thead>
             <tbody>
@@ -509,6 +511,8 @@ $total_disc_pct = ($gross_sum > 0) ? (($total_disc_all / $gross_sum) * 100) : 0;
                             <div class="prod-code"><?= htmlspecialchars($item['company_name']) ?></div>
                         <?php endif; ?>
                     </td>
+                    <td class="text-center font-monospace fw-bold" style="font-size:0.80rem;"><?= htmlspecialchars(!empty($item['batch_no']) ? $item['batch_no'] : 'DEFAULT') ?></td>
+                    <td class="text-center font-monospace" style="font-size:0.78rem;"><?= (!empty($item['expiry_date']) && $item['expiry_date'] !== '0000-00-00') ? date('d-m-Y', strtotime($item['expiry_date'])) : '—' ?></td>
                     <td class="text-center fw-bold"><?= $item['quantity'] ?></td>
                     <td class="text-center">
                         <?php if ($bonus_qty > 0): ?>

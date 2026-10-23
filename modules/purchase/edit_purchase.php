@@ -140,10 +140,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                 $stmt_upd_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ?, expiry_date = ?, purchase_price = ?, trade_price = ? WHERE id = ?");
                 $stmt_ins_batch = $pdo->prepare("INSERT INTO product_batches (product_id, batch_no, expiry_date, purchase_price, trade_price, retail_price, initial_quantity, current_stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active')");
 
+                $impacted_edit_pids = [];
+
                 foreach ($posted_items as $itm) {
                     $pid         = intval($itm['product_id'] ?? 0);
-                    $batch_no    = trim($itm['batch_no'] ?? 'DEFAULT');
+                    $batch_no    = trim($itm['batch_no'] ?? '');
+                    if ($batch_no === '') {
+                        $batch_no = 'DEFAULT';
+                    }
                     $expiry_date = !empty($itm['expiry_date']) ? $itm['expiry_date'] : date('Y-m-d', strtotime('+2 years'));
+                    $raw_qty     = max(0, intval($itm['quantity'] ?? 0));
+                    $bonus_qty   = max(0, intval($itm['bonus_quantity'] ?? 0));
                     $final_qty   = $raw_qty;
                     $final_bonus = $bonus_qty;
                     $total_stock = $final_qty + $final_bonus;
@@ -170,21 +177,31 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     $net_unit_cost = ($raw_qty > 0) ? ($row_net_after_bill_disc / $raw_qty) : $p_cost;
 
                     if ($pid > 0 && ($final_qty > 0 || $final_bonus > 0)) {
+                        $impacted_edit_pids[$pid] = true;
+
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
-                            $final_qty, $final_bonus, $net_unit_cost, $tp_rate,
+                            $final_qty, $final_bonus, $p_cost, $tp_rate,
                             $tp_rate, $disc_pct, $sale_disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
-                        $stmt_add_stock->execute([$total_stock, $base_pack_cost, $base_pack_tp, $pid]);
+                        $stmt_add_stock->execute([$total_stock, $net_unit_cost, $tp_rate, $pid]);
 
                         $stmt_chk_batch->execute([$pid, $batch_no]);
                         $b_id = $stmt_chk_batch->fetchColumn();
                         if ($b_id) {
-                            $stmt_upd_batch->execute([$total_stock, $expiry_date, $base_pack_cost, $base_pack_tp, $b_id]);
+                            $stmt_upd_batch->execute([$total_stock, $expiry_date, $net_unit_cost, $tp_rate, $b_id]);
                         } else {
-                            $stmt_ins_batch->execute([$pid, $batch_no, $expiry_date, $base_pack_cost, $base_pack_tp, $base_pack_tp, $total_stock, $total_stock]);
+                            $stmt_ins_batch->execute([$pid, $batch_no, $expiry_date, $net_unit_cost, $tp_rate, $tp_rate, $total_stock, $total_stock]);
                         }
+                    }
+                }
+
+                // Sync products.current_stock with product_batches
+                if (!empty($impacted_edit_pids)) {
+                    $sync_edit_stmt = $pdo->prepare("UPDATE products SET current_stock = (SELECT COALESCE(SUM(current_stock), 0) FROM product_batches WHERE product_id = ?) WHERE id = ?");
+                    foreach (array_keys($impacted_edit_pids) as $eip) {
+                        $sync_edit_stmt->execute([$eip, $eip]);
                     }
                 }
 
@@ -321,14 +338,16 @@ $products  = $pdo->query("
                 <table class="table table-bordered table-hover mb-0 align-middle" id="editItemsTable">
                     <thead class="bg-light text-dark font-weight-bold text-uppercase small">
                         <tr>
-                            <th style="min-width: 240px;">Medicine</th>
-                            <th style="width: 85px;" class="text-center">Qty (Pcs)</th>
-                            <th style="width: 120px;" class="text-right">Cost / Rate</th>
-                            <th style="width: 110px;" class="text-right">TP Ref</th>
-                            <th style="width: 85px;" class="text-center">Bonus (Pcs)</th>
-                            <th style="width: 85px;" class="text-center">Disc %</th>
-                            <th style="width: 85px;" class="text-center">GST %</th>
-                            <th style="width: 125px;" class="text-right">Total (Rs.)</th>
+                            <th style="min-width: 220px;">Medicine</th>
+                            <th style="width: 110px;" class="text-center">Batch #</th>
+                            <th style="width: 125px;" class="text-center">Expiry</th>
+                            <th style="width: 80px;" class="text-center">Qty (Pcs)</th>
+                            <th style="width: 110px;" class="text-right">Cost / Rate</th>
+                            <th style="width: 100px;" class="text-right">TP Ref</th>
+                            <th style="width: 80px;" class="text-center">Bonus (Pcs)</th>
+                            <th style="width: 80px;" class="text-center">Disc %</th>
+                            <th style="width: 80px;" class="text-center">GST %</th>
+                            <th style="width: 120px;" class="text-right">Total (Rs.)</th>
                             <th style="width: 45px;" class="text-center"></th>
                         </tr>
                     </thead>
@@ -481,8 +500,12 @@ function addEditRow(itemData = null) {
             <input type="hidden" id="ebaseCost_${editCounter}" value="${cost || '0.00'}">
             <input type="hidden" id="ebaseTp_${editCounter}" value="${tp || '0.00'}">
         </td>
-        <input type="hidden" name="items[${editCounter}][batch_no]" value="${batchNo}">
-        <input type="hidden" name="items[${editCounter}][expiry_date]" value="${expiry}">
+        <td>
+            <input type="text" name="items[${editCounter}][batch_no]" class="form-control form-control-sm text-center font-monospace font-weight-bold text-uppercase" value="${batchNo}" placeholder="BATCH #" required onfocus="this.select()">
+        </td>
+        <td>
+            <input type="date" name="items[${editCounter}][expiry_date]" class="form-control form-control-sm text-center font-weight-bold px-1" value="${expiry}" required>
+        </td>
         <td>
             <input type="number" min="1" name="items[${editCounter}][quantity]" id="eqty_${editCounter}" class="form-control form-control-sm text-center fw-bold" value="${qty}" placeholder="1" onfocus="this.select()" required oninput="calcEditRow(${editCounter})">
         </td>

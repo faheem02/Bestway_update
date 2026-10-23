@@ -273,9 +273,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 ");
 
+                $impacted_pids = [];
+
                 foreach ($items as $itm) {
                     $pid         = intval($itm['product_id'] ?? 0);
-                    $batch_no    = trim($itm['batch_no'] ?? 'DEFAULT');
+                    $batch_no    = trim($itm['batch_no'] ?? '');
+                    if ($batch_no === '') {
+                        $batch_no = 'DEFAULT';
+                    }
                     $expiry_date = !empty($itm['expiry_date']) ? $itm['expiry_date'] : date('Y-m-d', strtotime('+2 years'));
                     
                     // Quantity and Bonus in Pieces (Pcs) directly
@@ -325,6 +330,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     $net_unit_cost = ($all_total_stock > 0) ? ($row_net_after_bill_disc / $all_total_stock) : $p_cost;
 
                     if ($pid > 0 && $all_total_stock > 0) {
+                        $impacted_pids[$pid] = true;
+
                         // Insert Item Record
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
@@ -362,6 +369,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                                 $all_total_stock, $all_total_stock
                             ]);
                         }
+                    }
+                }
+
+                // Sync products.current_stock with total batches
+                if (!empty($impacted_pids)) {
+                    $sync_prod_stmt = $pdo->prepare("UPDATE products SET current_stock = (SELECT COALESCE(SUM(current_stock), 0) FROM product_batches WHERE product_id = ?) WHERE id = ?");
+                    foreach (array_keys($impacted_pids) as $ip_id) {
+                        $sync_prod_stmt->execute([$ip_id, $ip_id]);
                     }
                 }
 
@@ -741,6 +756,8 @@ if ($db_connected && $pdo) {
                     <thead>
                         <tr>
                             <th style="min-width: 220px;">Medicine / Product Name</th>
+                            <th style="width: 120px;" class="text-center">Batch #</th>
+                            <th style="width: 130px;" class="text-center">Expiry Date</th>
                             <th style="width: 75px;" class="text-center">Qty</th>
                             <th style="width: 70px;" class="text-center">Bonus</th>
                             <th style="width: 70px;" class="text-center">Total Qty</th>
@@ -1258,12 +1275,22 @@ function selectProductItem(rowId, p) {
     document.getElementById('medDropdown_' + rowId).classList.add('d-none');
     setActiveRow(rowId);
 
-    // Auto-focus quantity field for instant data entry and select content
-    const qtyInput = document.getElementById('qty_' + rowId);
-    if (qtyInput) {
-        if (!qtyInput.value) qtyInput.value = '1';
-        qtyInput.focus();
-        qtyInput.select();
+    // Show "+ Add Batch" quick button
+    const metaBox = document.getElementById('productMetaBox_' + rowId);
+    if (metaBox) metaBox.classList.remove('d-none');
+
+    // Auto-focus Batch No input so user can type batch number directly
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    if (batchInput) {
+        batchInput.focus();
+        batchInput.select();
+    } else {
+        const qtyInput = document.getElementById('qty_' + rowId);
+        if (qtyInput) {
+            if (!qtyInput.value) qtyInput.value = '1';
+            qtyInput.focus();
+            qtyInput.select();
+        }
     }
 }
 
@@ -1276,6 +1303,10 @@ function clearMedSelection(rowId) {
     document.getElementById('productId_' + rowId).value = '';
     document.getElementById('medSearch_' + rowId).value = '';
     document.getElementById('medClearBtn_' + rowId).classList.add('d-none');
+    const metaBox = document.getElementById('productMetaBox_' + rowId);
+    if (metaBox) metaBox.classList.add('d-none');
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    if (batchInput) batchInput.value = '';
     document.getElementById('baseCost_' + rowId).value = '0.00';
     document.getElementById('baseTp_' + rowId).value = '0.00';
     document.getElementById('cost_' + rowId).value = '';
@@ -1450,7 +1481,7 @@ function highlightActiveItem(items, activeIdx) {
 // ----------------------------------------------------
 // 3. TABLE ROW & BILL CALCULATION LOGIC
 // ----------------------------------------------------
-function addNewItemRow() {
+function addNewItemRow(prefilledData = null) {
     rowCounter++;
     const tbody = document.getElementById('itemsTableBody');
     const tr = document.createElement('tr');
@@ -1459,8 +1490,27 @@ function addNewItemRow() {
     tr.setAttribute('onclick', `setActiveRow(${rowCounter})`);
     tr.setAttribute('onfocusin', `setActiveRow(${rowCounter})`);
 
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 2);
+    const defaultExpiry = d.toISOString().split('T')[0];
+
+    const pId = prefilledData ? (prefilledData.product_id || '') : '';
+    const medName = prefilledData ? (prefilledData.med_name || '') : '';
+    const baseCost = prefilledData ? (prefilledData.base_cost || '0.00') : '0.00';
+    const baseTp = prefilledData ? (prefilledData.base_tp || '0.00') : '0.00';
+    const packsPerBox = prefilledData ? (prefilledData.packs_per_box || 1) : 1;
+    const cost = prefilledData ? (prefilledData.cost || '') : '';
+    const tp = prefilledData ? (prefilledData.tp || '') : '';
+    const discPct = prefilledData ? (prefilledData.disc_pct || '') : '';
+    const gstPct = prefilledData ? (prefilledData.gst_pct || '') : '';
+    const saleDiscPct = prefilledData ? (prefilledData.sale_disc_pct || '') : '';
+    const salePrice = prefilledData ? (prefilledData.sale_price || '') : '';
+    const batchNo = prefilledData ? (prefilledData.batch_no || '') : '';
+    const expiryDate = prefilledData ? (prefilledData.expiry_date || defaultExpiry) : defaultExpiry;
+
     tr.innerHTML = `
-        <td class="position-relative" style="min-width: 260px;">
+        <!-- 1. Medicine / Product Search -->
+        <td class="position-relative" style="min-width: 240px;">
             <div class="position-relative" id="medSearchContainer_${rowCounter}">
                 <div class="input-group">
                     <div class="input-group-prepend">
@@ -1471,29 +1521,64 @@ function addNewItemRow() {
                            class="form-control font-weight-bold med-search-input" 
                            placeholder="Type to search medicine..." 
                            autocomplete="off"
+                           value="${medName}"
                            onfocus="onMedSearchFocus(${rowCounter})"
                            oninput="onMedSearchInput(${rowCounter})"
                            onkeydown="onMedSearchKeydown(event, ${rowCounter})">
                     <div class="input-group-append">
-                        <button type="button" class="btn btn-outline-secondary d-none" id="medClearBtn_${rowCounter}" onclick="clearMedSelection(${rowCounter})" title="Change medicine">
+                        <button type="button" class="btn btn-outline-secondary ${pId ? '' : 'd-none'}" id="medClearBtn_${rowCounter}" onclick="clearMedSelection(${rowCounter})" title="Change medicine">
                             <i class="fas fa-times"></i>
                         </button>
                     </div>
                 </div>
-                <input type="hidden" name="items[${rowCounter}][product_id]" id="productId_${rowCounter}" required value="">
+                <input type="hidden" name="items[${rowCounter}][product_id]" id="productId_${rowCounter}" required value="${pId}">
 
                 <!-- Live Medicine Dropdown -->
                 <div id="medDropdown_${rowCounter}" class="search-dropdown-menu med-dropdown d-none">
                     <div id="medResultsList_${rowCounter}"></div>
                 </div>
+
+                <!-- Quick Action: Add Another Batch for this Product -->
+                <div class="d-flex align-items-center justify-content-between mt-1 ${pId ? '' : 'd-none'}" id="productMetaBox_${rowCounter}">
+                    <span class="badge badge-light border text-primary small py-0 px-1 font-weight-bold">
+                        <i class="fas fa-check-circle text-success mr-1"></i>Selected
+                    </span>
+                    <button type="button" 
+                            class="btn btn-xs btn-outline-success font-weight-bold py-0 px-2" 
+                            onclick="addAnotherBatchForProduct(${rowCounter})" 
+                            title="Add another batch for this medicine">
+                        <i class="fas fa-plus-circle mr-1"></i>+ Add Batch
+                    </button>
+                </div>
             </div>
-            <input type="hidden" id="baseCost_${rowCounter}" value="0.00">
-            <input type="hidden" id="baseTp_${rowCounter}" value="0.00">
-            <input type="hidden" id="packsPerBox_${rowCounter}" value="1">
+            <input type="hidden" id="baseCost_${rowCounter}" value="${baseCost}">
+            <input type="hidden" id="baseTp_${rowCounter}" value="${baseTp}">
+            <input type="hidden" id="packsPerBox_${rowCounter}" value="${packsPerBox}">
             <input type="hidden" id="totalQty_${rowCounter}" value="0">
             <input type="hidden" id="allTotalQty_${rowCounter}" value="0">
-            <input type="hidden" name="items[${rowCounter}][batch_no]" value="DEFAULT">
-            <input type="hidden" name="items[${rowCounter}][expiry_date]" value="<?= date('Y-m-d', strtotime('+2 years')) ?>">
+        </td>
+
+        <!-- 1.5 Batch # -->
+        <td style="width: 120px;">
+            <input type="text" 
+                   name="items[${rowCounter}][batch_no]" 
+                   id="batchNo_${rowCounter}" 
+                   class="form-control text-center font-monospace font-weight-bold text-uppercase" 
+                   placeholder="BATCH #" 
+                   value="${batchNo}" 
+                   autocomplete="off" 
+                   required
+                   onfocus="this.select()">
+        </td>
+
+        <!-- 1.6 Expiry Date -->
+        <td style="width: 130px;">
+            <input type="date" 
+                   name="items[${rowCounter}][expiry_date]" 
+                   id="expiry_${rowCounter}" 
+                   class="form-control text-center font-weight-bold px-1" 
+                   value="${expiryDate}" 
+                   required>
         </td>
 
         <!-- 2. Quantity (Pcs) -->
@@ -1514,19 +1599,19 @@ function addNewItemRow() {
 
         <!-- 4. Purchase Rate / TP -->
         <td style="width: 105px;">
-            <input type="number" step="0.01" min="0" name="items[${rowCounter}][purchase_price]" id="cost_${rowCounter}" class="form-control text-right font-weight-bold" placeholder="0.00" value="" onfocus="this.select()" required oninput="onCostChange(${rowCounter})">
+            <input type="number" step="0.01" min="0" name="items[${rowCounter}][purchase_price]" id="cost_${rowCounter}" class="form-control text-right font-weight-bold" placeholder="0.00" value="${cost}" onfocus="this.select()" required oninput="onCostChange(${rowCounter})">
         </td>
 
         <!-- 5. TP Discount % -->
         <td style="width: 80px;">
-            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold text-success" placeholder="0.00" value="" title="TP Discount % (Supplier Disc)" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
+            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold text-success" placeholder="0.00" value="${discPct}" title="TP Discount % (Supplier Disc)" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][discount_amount]" id="discAmt_${rowCounter}" value="0.00">
             <div id="discAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 5.5 GST % -->
         <td style="width: 75px;">
-            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][tax_percent]" id="gstPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
+            <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][tax_percent]" id="gstPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="${gstPct}" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][tax_amount]" id="taxAmt_${rowCounter}" value="0.00">
             <div id="taxAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
@@ -1551,14 +1636,14 @@ function addNewItemRow() {
         <!-- 8. Sale Disc on TP % -->
         <td style="width: 115px;">
             <div class="input-group input-group-sm">
-                <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][sale_discount_percent]" id="saleDiscPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="" onfocus="this.select()" oninput="onRowSaleDiscChange(${rowCounter})">
+                <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][sale_discount_percent]" id="saleDiscPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="${saleDiscPct}" onfocus="this.select()" oninput="onRowSaleDiscChange(${rowCounter})">
                 <div class="input-group-append">
                     <span class="input-group-text bg-white text-primary font-weight-bold px-1" style="font-size:0.70rem;">%</span>
                 </div>
             </div>
             <div id="salePriceDisp_${rowCounter}" class="text-center font-weight-bold text-primary mt-1" style="font-size: 0.70rem;">Sale: Rs. 0.00</div>
-            <input type="hidden" name="items[${rowCounter}][trade_price]" id="tp_${rowCounter}" value="0.00">
-            <input type="hidden" name="items[${rowCounter}][sale_price]" id="salePrice_${rowCounter}" value="0.00">
+            <input type="hidden" name="items[${rowCounter}][trade_price]" id="tp_${rowCounter}" value="${tp}">
+            <input type="hidden" name="items[${rowCounter}][sale_price]" id="salePrice_${rowCounter}" value="${salePrice}">
         </td>
 
         <!-- 9. Action -->
@@ -1570,8 +1655,51 @@ function addNewItemRow() {
     `;
 
     tbody.appendChild(tr);
+    if (prefilledData) {
+        calculateRowTotal(rowCounter);
+        updateRowSalePrice(rowCounter);
+    }
     calculateBillTotals();
     setActiveRow(rowCounter);
+}
+
+function addAnotherBatchForProduct(sourceRowId) {
+    const pId = document.getElementById('productId_' + sourceRowId)?.value;
+    if (!pId) return;
+
+    const medName = document.getElementById('medSearch_' + sourceRowId)?.value || '';
+    const baseCost = document.getElementById('baseCost_' + sourceRowId)?.value || '0.00';
+    const baseTp = document.getElementById('baseTp_' + sourceRowId)?.value || '0.00';
+    const packsPerBox = document.getElementById('packsPerBox_' + sourceRowId)?.value || 1;
+    const cost = document.getElementById('cost_' + sourceRowId)?.value || '';
+    const tp = document.getElementById('tp_' + sourceRowId)?.value || '';
+    const discPct = document.getElementById('discPct_' + sourceRowId)?.value || '';
+    const gstPct = document.getElementById('gstPct_' + sourceRowId)?.value || '';
+    const saleDiscPct = document.getElementById('saleDiscPct_' + sourceRowId)?.value || '';
+    const salePrice = document.getElementById('salePrice_' + sourceRowId)?.value || '';
+    const expDate = document.getElementById('expiry_' + sourceRowId)?.value || '';
+
+    addNewItemRow({
+        product_id: pId,
+        med_name: medName,
+        base_cost: baseCost,
+        base_tp: baseTp,
+        packs_per_box: packsPerBox,
+        cost: cost,
+        tp: tp,
+        disc_pct: discPct,
+        gst_pct: gstPct,
+        sale_disc_pct: saleDiscPct,
+        sale_price: salePrice,
+        batch_no: '',
+        expiry_date: expDate
+    });
+
+    const newBatchInput = document.getElementById('batchNo_' + rowCounter);
+    if (newBatchInput) {
+        newBatchInput.focus();
+        newBatchInput.select();
+    }
 }
 
 function calculateRowTotal(rowId) {

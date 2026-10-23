@@ -328,9 +328,19 @@ if ($inv_balance <= 0.01) {
                                     $item_name_cleaned = preg_replace('/\s*(\[|\()?prd\s*-\s*\d+(\]|\))?/i', '', $it['item_name']);
                                 ?>
                                 <strong class="text-dark"><?= htmlspecialchars(trim($item_name_cleaned) ?: $it['item_name']) ?></strong>
-                                <?php if ($pinfo && !empty($pinfo['company_name'])): ?>
-                                    <div class="small text-muted"><i class="fa-solid fa-industry me-1"></i><?= htmlspecialchars($pinfo['company_name']) ?></div>
-                                <?php endif; ?>
+                                <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
+                                    <?php if (!empty($it['batch_no'])): ?>
+                                        <span class="badge bg-light text-dark border font-monospace" style="font-size: 11px;">
+                                            <i class="fa-solid fa-barcode text-primary me-1"></i>Batch: <?= htmlspecialchars($it['batch_no']) ?>
+                                            <?php if (!empty($it['expiry_date']) && $it['expiry_date'] !== '0000-00-00'): ?>
+                                                <span class="text-muted ms-1">| Exp: <?= htmlspecialchars($it['expiry_date']) ?></span>
+                                            <?php endif; ?>
+                                        </span>
+                                    <?php endif; ?>
+                                    <?php if ($pinfo && !empty($pinfo['company_name'])): ?>
+                                        <span class="small text-muted"><i class="fa-solid fa-industry me-1"></i><?= htmlspecialchars($pinfo['company_name']) ?></span>
+                                    <?php endif; ?>
+                                </div>
                             </td>
                             <td class="text-center fw-bold text-dark"><?= $q ?></td>
                             <td class="text-end font-monospace">Rs. <?= number_format($tp, 2) ?></td>

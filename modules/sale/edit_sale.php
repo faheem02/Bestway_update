@@ -26,8 +26,50 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
             $stmt->execute();
         }
         $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Attach active batches to each returned product
+        if (!empty($res)) {
+            $pids = array_column($res, 'id');
+            $in_clause = implode(',', array_fill(0, count($pids), '?'));
+            $b_stmt = $pdo->prepare("
+                SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
+                FROM product_batches 
+                WHERE product_id IN ($in_clause) AND status = 'Active' 
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
+            ");
+            $b_stmt->execute($pids);
+            $batch_map = [];
+            while ($b = $b_stmt->fetch(PDO::FETCH_ASSOC)) {
+                $batch_map[$b['product_id']][] = $b;
+            }
+            foreach ($res as &$pr) {
+                $pr['batches'] = $batch_map[$pr['id']] ?? [];
+            }
+            unset($pr);
+        }
     }
     echo json_encode($res);
+    exit;
+}
+
+// AJAX endpoint to fetch all active batches for a single product
+if (isset($_GET['action']) && $_GET['action'] === 'get_product_batches') {
+    header('Content-Type: application/json');
+    $pid = intval($_GET['product_id'] ?? 0);
+    $batches = [];
+    if ($db_connected && $pdo && $pid > 0) {
+        try {
+            $b_stmt = $pdo->prepare("
+                SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
+                FROM product_batches 
+                WHERE product_id = ? AND status = 'Active' 
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
+            ");
+            $b_stmt->execute([$pid]);
+            $batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {}
+    }
+    echo json_encode(['success' => true, 'batches' => $batches]);
     exit;
 }
 
@@ -71,6 +113,24 @@ if ($db_connected && $pdo) {
             ORDER BY p.name ASC
         ");
         $initial_products = $stmt_init_p->fetchAll(PDO::FETCH_ASSOC);
+
+        // Attach active batches to initial products
+        if (!empty($initial_products)) {
+            $b_stmt = $pdo->query("
+                SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
+                FROM product_batches 
+                WHERE status = 'Active' 
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
+            ");
+            $b_map = [];
+            while ($b = $b_stmt->fetch(PDO::FETCH_ASSOC)) {
+                $b_map[$b['product_id']][] = $b;
+            }
+            foreach ($initial_products as &$pr) {
+                $pr['batches'] = $b_map[$pr['id']] ?? [];
+            }
+            unset($pr);
+        }
     } catch (Exception $e) {}
 }
 
@@ -136,6 +196,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     $unit_prices = (isset($_POST['unit_price']) && is_array($_POST['unit_price'])) ? $_POST['unit_price'] : [];
     $discounts   = (isset($_POST['disc_percent']) && is_array($_POST['disc_percent'])) ? $_POST['disc_percent'] : [];
     $extra_discs = (isset($_POST['extra_disc_percent']) && is_array($_POST['extra_disc_percent'])) ? $_POST['extra_disc_percent'] : [];
+    $batch_nos   = (isset($_POST['batch_no']) && is_array($_POST['batch_no'])) ? $_POST['batch_no'] : [];
+    $batch_ids   = (isset($_POST['batch_id']) && is_array($_POST['batch_id'])) ? $_POST['batch_id'] : [];
+    $expiries    = (isset($_POST['expiry_date']) && is_array($_POST['expiry_date'])) ? $_POST['expiry_date'] : [];
 
     if (empty($customer_name) || empty($invoice_date) || empty($product_ids)) {
         $message = "Customer name, date, and at least one product item are required.";
@@ -147,8 +210,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $pdo->beginTransaction();
             }
 
-            // STEP 1: Fetch old items and REVERT their quantities to stock
-            $old_items_stmt = $conn->prepare("SELECT product_id, quantity, discount_percent FROM sale_items WHERE invoice_id = ?");
+            // STEP 1: Fetch old items and REVERT their quantities to stock (Both product stock and batch stock)
+            $old_items_stmt = $conn->prepare("SELECT product_id, quantity, discount_percent, batch_id, batch_no FROM sale_items WHERE invoice_id = ?");
             $old_items_stmt->bind_param("i", $id);
             $old_items_stmt->execute();
             $old_res = $old_items_stmt->get_result();
@@ -161,11 +224,20 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             if ($db_connected && $pdo) {
                 $stmt_restore = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
+                $stmt_restore_b_id = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE id = ?");
+                $stmt_restore_b_no = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE product_id = ? AND batch_no = ?");
                 foreach ($old_items as $oit) {
                     $opid = intval($oit['product_id']);
                     $oqty = intval($oit['quantity']);
+                    $obid = intval($oit['batch_id'] ?? 0);
+                    $obno = trim($oit['batch_no'] ?? '');
                     if ($opid > 0 && $oqty > 0) {
                         $stmt_restore->execute([$oqty, $opid]);
+                        if ($obid > 0) {
+                            $stmt_restore_b_id->execute([$oqty, $obid]);
+                        } elseif (!empty($obno) && $obno !== 'DEFAULT') {
+                            $stmt_restore_b_no->execute([$oqty, $opid, $obno]);
+                        }
                     }
                 }
             }
@@ -182,6 +254,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $disc  = floatval($discounts[$i] ?? 0);
                 $xdisc = floatval($extra_discs[$i] ?? 0);
                 $name  = trim($item_names[$i] ?? '');
+                $b_no  = trim($batch_nos[$i] ?? '');
+                $b_id  = intval($batch_ids[$i] ?? 0);
+                $b_exp = !empty($expiries[$i]) ? trim($expiries[$i]) : null;
 
                 if ($pid <= 0) {
                     throw new Exception("Row #" . ($i + 1) . ": Please search and select a registered product from the system list.");
@@ -210,6 +285,12 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     throw new Exception("⚠️ Error: Product '{$p_name}' has only {$avail_stock} in stock, but entered quantity is {$qty}!");
                 }
 
+                // Honor user-entered / batch rate
+                if ($tp <= 0) {
+                    $tp = floatval($prod_row['trade_price'] ?? 0);
+                    if ($tp <= 0) $tp = floatval($prod_row['purchase_price'] ?? 0);
+                }
+
                 if (!isAdmin()) {
                     $disc = array_key_exists($pid, $old_item_discounts)
                         ? max(0.0, min(100.0, $old_item_discounts[$pid]))
@@ -225,13 +306,16 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $total_discount_cut += ($gross - $net);
 
                 $validated_items[] = [
-                    'product_id' => $pid,
-                    'name'       => $p_name,
-                    'qty'        => $qty,
-                    'tp'         => $tp,
-                    'disc'       => $disc,
-                    'xdisc'      => $xdisc,
-                    'net'        => $net
+                    'product_id'  => $pid,
+                    'name'        => $p_name,
+                    'batch_id'    => $b_id,
+                    'batch_no'    => $b_no,
+                    'expiry_date' => $b_exp,
+                    'qty'         => $qty,
+                    'tp'          => $tp,
+                    'disc'        => $disc,
+                    'xdisc'       => $xdisc,
+                    'net'         => $net
                 ];
             }
 
@@ -279,12 +363,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             $stmt_si = $pdo->prepare("
                 INSERT INTO sale_items 
-                (invoice_id, sale_id, product_id, item_name, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price) 
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (invoice_id, sale_id, product_id, item_name, batch_id, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price) 
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt_deduct_stock = $pdo->prepare("UPDATE products SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
+            $stmt_deduct_batch_id = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
+            $stmt_deduct_batch_no = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE product_id = ? AND batch_no = ?");
+            $stmt_get_batch_info = $pdo->prepare("SELECT id, batch_no, expiry_date FROM product_batches WHERE id = ? LIMIT 1");
             $stmt_batches_fifo = $pdo->prepare("SELECT id, batch_no, expiry_date, current_stock FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY expiry_date ASC, id ASC");
-            $stmt_deduct_batch = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
 
             foreach ($validated_items as $v_item) {
                 $pid   = $v_item['product_id'];
@@ -294,24 +380,43 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $disc  = $v_item['disc'];
                 $xdisc = $v_item['xdisc'];
                 $l_net = $v_item['net'];
+                $b_id  = $v_item['batch_id'] ?? 0;
+                $b_no  = $v_item['batch_no'] ?? '';
+                $b_exp = $v_item['expiry_date'] ?? null;
 
-                // DEDUCT FROM BATCHES (FIFO) & get batch info
-                $stmt_batches_fifo->execute([$pid]);
-                $batches = $stmt_batches_fifo->fetchAll(PDO::FETCH_ASSOC);
-                $rem_qty = $qty;
-                $assigned_batch = '';
-                $assigned_expiry = null;
-
-                if (!empty($batches)) {
-                    $assigned_batch = $batches[0]['batch_no'] ?? '';
-                    $assigned_expiry = !empty($batches[0]['expiry_date']) ? $batches[0]['expiry_date'] : null;
-                    foreach ($batches as $b) {
-                        if ($rem_qty <= 0) break;
-                        $b_stock = intval($b['current_stock']);
-                        $deduct = min($rem_qty, $b_stock);
-                        $stmt_deduct_batch->execute([$deduct, $b['id']]);
-                        $rem_qty -= $deduct;
+                // 1. Deduct from selected batch if provided
+                if ($b_id > 0) {
+                    $stmt_deduct_batch_id->execute([$qty, $b_id]);
+                    if (empty($b_exp) || empty($b_no)) {
+                        $stmt_get_batch_info->execute([$b_id]);
+                        $b_info = $stmt_get_batch_info->fetch(PDO::FETCH_ASSOC);
+                        if ($b_info) {
+                            if (empty($b_no)) $b_no = $b_info['batch_no'];
+                            if (empty($b_exp)) $b_exp = $b_info['expiry_date'];
+                        }
                     }
+                } elseif (!empty($b_no) && $b_no !== 'DEFAULT') {
+                    $stmt_deduct_batch_no->execute([$qty, $pid, $b_no]);
+                } else {
+                    // Fallback to FIFO
+                    $stmt_batches_fifo->execute([$pid]);
+                    $batches = $stmt_batches_fifo->fetchAll(PDO::FETCH_ASSOC);
+                    $rem_qty = $qty;
+                    if (!empty($batches)) {
+                        $b_no = $batches[0]['batch_no'] ?? 'DEFAULT';
+                        $b_exp = !empty($batches[0]['expiry_date']) ? $batches[0]['expiry_date'] : null;
+                        foreach ($batches as $b) {
+                            if ($rem_qty <= 0) break;
+                            $b_stock = intval($b['current_stock']);
+                            $deduct = min($rem_qty, $b_stock);
+                            $stmt_deduct_batch_id->execute([$deduct, $b['id']]);
+                            $rem_qty -= $deduct;
+                        }
+                    }
+                }
+
+                if (empty($b_no)) {
+                    $b_no = 'DEFAULT';
                 }
 
                 // Insert into sale_items using PDO
@@ -319,8 +424,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     $id,
                     $pid,
                     $pname,
-                    $assigned_batch,
-                    $assigned_expiry,
+                    $b_id > 0 ? $b_id : null,
+                    $b_no,
+                    $b_exp,
                     $qty,
                     $tp,
                     $tp,
@@ -707,12 +813,13 @@ $item_stmt->close();
                     <thead class="thead-light">
                         <tr>
                             <th style="width: 40px;" class="text-center">#</th>
-                            <th style="min-width: 320px;">Medicine / Product Name <span class="text-danger">*</span></th>
-                            <th style="width: 120px;" class="text-center">Qty (Pcs) <span class="text-danger">*</span></th>
-                            <th style="width: 150px;" class="text-right">TP / Price (Rs) <span class="text-danger">*</span></th>
-                            <th style="width: 110px;" class="text-center">Disc %</th>
-                            <th style="width: 160px;" class="text-right">Net Total (Rs)</th>
-                            <th style="width: 60px;" class="text-center">Action</th>
+                            <th style="min-width: 280px;">Medicine / Product Name <span class="text-danger">*</span></th>
+                            <th style="width: 220px;">Batch No</th>
+                            <th style="width: 110px;" class="text-center">Qty (Pcs) <span class="text-danger">*</span></th>
+                            <th style="width: 140px;" class="text-right">Price / Rate (Rs) <span class="text-danger">*</span></th>
+                            <th style="width: 100px;" class="text-center">Disc %</th>
+                            <th style="width: 150px;" class="text-right">Net Total (Rs)</th>
+                            <th style="width: 50px;" class="text-center">Action</th>
                         </tr>
                     </thead>
                     <tbody id="itemsBody">
@@ -868,10 +975,24 @@ $item_stmt->close();
                 </div>
             </td>
             <td>
+                <div class="batch-select-wrap" id="batchWrap_${rowId}">
+                    <select name="batch_no[]" 
+                            id="batchSelect_${rowId}" 
+                            class="form-control form-control-sm font-weight-bold batch-select font-monospace" 
+                            onchange="onBatchSelectChange(${rowId})" 
+                            required>
+                        <option value="">-- Batch --</option>
+                    </select>
+                    <input type="hidden" name="batch_id[]" id="batchId_${rowId}" value="">
+                    <input type="hidden" name="expiry_date[]" id="batchExpiry_${rowId}" value="">
+                    <div class="batch-sub-meta mt-1 small d-none" id="batchSub_${rowId}" style="font-size: 11px;"></div>
+                </div>
+            </td>
+            <td>
                 <input type="number" name="quantity[]" id="qty_${rowId}" class="form-control form-control-sm qty-input text-center font-weight-bold" min="1" placeholder="1" value="" onfocus="this.select()" oninput="onQtyChange(${rowId})" required>
             </td>
             <td>
-                <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control form-control-sm tp-input text-right font-weight-bold" placeholder="0.00" onfocus="this.select()" required>
+                <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control form-control-sm tp-input text-right font-weight-bold text-primary" placeholder="0.00" onfocus="this.select()" oninput="recalculateAll()" required>
             </td>
             <td>
                 <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control form-control-sm disc-input text-center" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
@@ -909,6 +1030,69 @@ $item_stmt->close();
 
             const clearBtn = document.getElementById('medClearBtn_' + rowId);
             if (clearBtn) clearBtn.classList.remove('d-none');
+
+            // Populate batches dropdown and select existing batch
+            const batchSelect = document.getElementById('batchSelect_' + rowId);
+            const batchIdInput = document.getElementById('batchId_' + rowId);
+            const batchExpInput = document.getElementById('batchExpiry_' + rowId);
+            const batchSub = document.getElementById('batchSub_' + rowId);
+
+            if (batchSelect) {
+                batchSelect.innerHTML = '';
+                const batches = (prod && prod.batches && Array.isArray(prod.batches)) ? prod.batches : [];
+                const savedBatchNo = defaultData.batch_no || 'DEFAULT';
+                const savedBatchId = defaultData.batch_id || 0;
+                const savedExpiry  = defaultData.expiry_date || '';
+
+                if (batchIdInput) batchIdInput.value = savedBatchId;
+                if (batchExpInput) batchExpInput.value = savedExpiry;
+
+                let foundBatch = false;
+                if (batches.length > 0) {
+                    batches.forEach(b => {
+                        const bRate = parseFloat(b.trade_price > 0 ? b.trade_price : (b.retail_price > 0 ? b.retail_price : (defaultData.unit_price || 0))) || 0;
+                        let bStock = parseInt(b.current_stock || 0);
+                        if (String(b.batch_no) === String(savedBatchNo) || String(b.id) === String(savedBatchId)) {
+                            bStock += parseInt(defaultData.quantity || 0);
+                        }
+                        const opt = document.createElement('option');
+                        opt.value = b.batch_no;
+                        opt.dataset.batchId = b.id;
+                        opt.dataset.rate = bRate.toFixed(2);
+                        opt.dataset.stock = bStock;
+                        opt.dataset.expiry = b.expiry_date || '';
+                        let expShort = '';
+                        if (b.expiry_date && b.expiry_date !== '0000-00-00') {
+                            expShort = ' | Exp: ' + b.expiry_date;
+                        }
+                        opt.textContent = `${b.batch_no} — Rs. ${bRate.toFixed(2)} (Stock: ${bStock} Pcs${expShort})`;
+                        if (String(b.batch_no) === String(savedBatchNo) || String(b.id) === String(savedBatchId)) {
+                            opt.selected = true;
+                            foundBatch = true;
+                        }
+                        batchSelect.appendChild(opt);
+                    });
+                }
+
+                if (!foundBatch) {
+                    const opt = document.createElement('option');
+                    opt.value = savedBatchNo;
+                    opt.dataset.batchId = savedBatchId;
+                    opt.dataset.rate = parseFloat(defaultData.unit_price || 0).toFixed(2);
+                    opt.dataset.stock = stock;
+                    opt.dataset.expiry = savedExpiry;
+                    opt.selected = true;
+                    let expShort = (savedExpiry && savedExpiry !== '0000-00-00') ? ` | Exp: ${savedExpiry}` : '';
+                    opt.textContent = `${savedBatchNo} — Rs. ${parseFloat(defaultData.unit_price || 0).toFixed(2)}${expShort}`;
+                    batchSelect.appendChild(opt);
+                }
+
+                if (batchSub) {
+                    batchSub.classList.remove('d-none');
+                    let expHtml = (savedExpiry && savedExpiry !== '0000-00-00') ? ` <span class="badge badge-light border text-muted">Exp: ${savedExpiry}</span>` : '';
+                    batchSub.innerHTML = `<span class="badge badge-info">Batch: ${savedBatchNo}</span>${expHtml}`;
+                }
+            }
         }
 
         updateRowIndices();
@@ -1020,6 +1204,54 @@ $item_stmt->close();
         const clearBtn = document.getElementById('medClearBtn_' + rowId);
         if (clearBtn) clearBtn.classList.remove('d-none');
 
+        // Populate Batches dropdown
+        const batchSelect = document.getElementById('batchSelect_' + rowId);
+        if (batchSelect) {
+            batchSelect.innerHTML = '';
+            const batches = (p.batches && Array.isArray(p.batches)) ? p.batches : [];
+
+            if (batches.length > 0) {
+                batches.forEach(b => {
+                    const bRate = parseFloat(b.trade_price > 0 ? b.trade_price : (b.retail_price > 0 ? b.retail_price : tpRate)) || tpRate;
+                    const bStock = parseInt(b.current_stock || 0);
+                    const opt = document.createElement('option');
+                    opt.value = b.batch_no;
+                    opt.dataset.batchId = b.id;
+                    opt.dataset.rate = bRate.toFixed(2);
+                    opt.dataset.stock = bStock;
+                    opt.dataset.expiry = b.expiry_date || '';
+
+                    let expShort = '';
+                    if (b.expiry_date && b.expiry_date !== '0000-00-00') {
+                        expShort = ' | Exp: ' + b.expiry_date;
+                    }
+                    opt.textContent = `${b.batch_no} — Rs. ${bRate.toFixed(2)} (Stock: ${bStock} Pcs${expShort})`;
+                    batchSelect.appendChild(opt);
+                });
+
+                // Pick first batch with stock > 0, otherwise first batch
+                const firstAvailable = batches.findIndex(b => parseInt(b.current_stock || 0) > 0);
+                if (firstAvailable >= 0) {
+                    batchSelect.selectedIndex = firstAvailable;
+                } else {
+                    batchSelect.selectedIndex = 0;
+                }
+            } else {
+                // If no batch record in DB yet
+                const opt = document.createElement('option');
+                opt.value = 'DEFAULT';
+                opt.dataset.batchId = '0';
+                opt.dataset.rate = tpRate.toFixed(2);
+                opt.dataset.stock = stock;
+                opt.dataset.expiry = '';
+                opt.textContent = `DEFAULT — Rs. ${tpRate.toFixed(2)} (Stock: ${stock} Pcs)`;
+                batchSelect.appendChild(opt);
+            }
+
+            // Trigger batch selection to update Price and batch metadata
+            onBatchSelectChange(rowId);
+        }
+
         const qtyInput = document.getElementById('qty_' + rowId);
         qtyInput.max = stock;
 
@@ -1029,6 +1261,41 @@ $item_stmt->close();
         recalculateAll();
         qtyInput.focus();
         qtyInput.select();
+    }
+
+    function onBatchSelectChange(rowId) {
+        const batchSelect = document.getElementById('batchSelect_' + rowId);
+        const tpInput = document.getElementById('tp_' + rowId);
+        const batchIdInput = document.getElementById('batchId_' + rowId);
+        const batchExpInput = document.getElementById('batchExpiry_' + rowId);
+        const batchSub = document.getElementById('batchSub_' + rowId);
+
+        if (!batchSelect || batchSelect.selectedIndex < 0) return;
+
+        const opt = batchSelect.options[batchSelect.selectedIndex];
+        if (!opt) return;
+
+        const rate = parseFloat(opt.dataset.rate || 0);
+        const batchStock = parseInt(opt.dataset.stock || 0);
+        const batchId = opt.dataset.batchId || 0;
+        const expiry = opt.dataset.expiry || '';
+
+        // Auto-fill batch rate into Price field (which is editable by user)
+        if (tpInput) {
+            tpInput.value = rate > 0 ? rate.toFixed(2) : '0.00';
+        }
+
+        if (batchIdInput) batchIdInput.value = batchId;
+        if (batchExpInput) batchExpInput.value = expiry;
+
+        if (batchSub) {
+            batchSub.classList.remove('d-none');
+            let badgeClass = batchStock > 0 ? 'badge-success' : 'badge-danger';
+            let expHtml = (expiry && expiry !== '0000-00-00') ? ` <span class="badge badge-light border text-muted">Exp: ${expiry}</span>` : '';
+            batchSub.innerHTML = `<span class="badge ${badgeClass}">Batch Stock: ${batchStock} Pcs</span>${expHtml}`;
+        }
+
+        recalculateAll();
     }
 
     function clearProductRow(rowId) {
@@ -1042,6 +1309,14 @@ $item_stmt->close();
         document.getElementById('itemName_' + rowId).value = '';
         document.getElementById('stockAvailable_' + rowId).value = '0';
         document.getElementById('tp_' + rowId).value = '';
+        const batchSelect = document.getElementById('batchSelect_' + rowId);
+        if (batchSelect) batchSelect.innerHTML = '<option value="">-- Batch --</option>';
+        const batchIdInput = document.getElementById('batchId_' + rowId);
+        if (batchIdInput) batchIdInput.value = '';
+        const batchExpInput = document.getElementById('batchExpiry_' + rowId);
+        if (batchExpInput) batchExpInput.value = '';
+        const batchSub = document.getElementById('batchSub_' + rowId);
+        if (batchSub) batchSub.classList.add('d-none');
         const clearBtn = document.getElementById('medClearBtn_' + rowId);
         if (clearBtn) clearBtn.classList.add('d-none');
         recalculateAll();

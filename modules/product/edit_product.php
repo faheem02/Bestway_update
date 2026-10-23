@@ -37,13 +37,13 @@ if (!$prod) {
     exit;
 }
 
-// Fetch latest batch info
-$latest_batch = null;
+// Fetch all existing batches
+$existing_batches = [];
 if ($db_connected && $pdo) {
     try {
-        $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+        $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id ASC");
         $b_stmt->execute([$product_id]);
-        $latest_batch = $b_stmt->fetch();
+        $existing_batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {}
 }
 
@@ -80,6 +80,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                     throw new Exception("Product code '{$product_code}' already exists for another product.");
                 }
 
+                $pdo->beginTransaction();
+
                 $stmt = $pdo->prepare("
                     UPDATE products SET 
                         product_code = ?, name = ?, company_id = ?, category_id = ?,
@@ -95,20 +97,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                     $reorder_level, $status, $product_id
                 ]);
 
-                // Update / create batch in product_batches
-                $batch_no    = trim($_POST['batch_no'] ?? '');
-                $expiry_date = trim($_POST['expiry_date'] ?? '');
-                if (!empty($batch_no)) {
-                    if ($latest_batch) {
-                        $upd_b = $pdo->prepare("UPDATE product_batches SET batch_no = ?, expiry_date = COALESCE(NULLIF(?, ''), expiry_date) WHERE id = ?");
-                        $upd_b->execute([$batch_no, $expiry_date ?: null, $latest_batch['id']]);
-                    } else {
-                        $ins_b = $pdo->prepare("INSERT INTO product_batches (product_id, batch_no, manufacturing_date, expiry_date, purchase_price, trade_price, retail_price, initial_quantity, current_stock, status) VALUES (?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, 'Active')");
-                        $ins_b->execute([$product_id, $batch_no, !empty($expiry_date) ? $expiry_date : date('Y-m-d', strtotime('+2 years')), $purchase_price, $trade_price, $retail_price, $prod['current_stock'], $prod['current_stock']]);
+                // Handle Multiple Batches Update & Insert
+                $b_ids            = $_POST['batch_id'] ?? [];
+                $b_nos            = $_POST['batch_no'] ?? [];
+                $b_expiries       = $_POST['batch_expiry'] ?? [];
+                $b_rates          = $_POST['batch_rate'] ?? [];
+                $b_purchases      = $_POST['batch_purchase_rate'] ?? [];
+                $b_stocks         = $_POST['batch_stock'] ?? [];
+
+                $upd_batch_stmt = $pdo->prepare("
+                    UPDATE product_batches 
+                    SET batch_no = ?, expiry_date = ?, trade_price = ?, retail_price = ?, purchase_price = ?, current_stock = ?, status = ?
+                    WHERE id = ? AND product_id = ?
+                ");
+
+                $ins_batch_stmt = $pdo->prepare("
+                    INSERT INTO product_batches (
+                        product_id, batch_no, manufacturing_date, expiry_date,
+                        purchase_price, trade_price, retail_price,
+                        initial_quantity, current_stock, status
+                    ) VALUES (?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, 'Active')
+                ");
+
+                $recalculated_total_stock = 0;
+
+                if (is_array($b_nos)) {
+                    for ($i = 0; $i < count($b_nos); $i++) {
+                        $bid   = intval($b_ids[$i] ?? 0);
+                        $bno   = trim($b_nos[$i] ?? '');
+                        $bexp  = trim($b_expiries[$i] ?? '');
+                        $brate = floatval($b_rates[$i] ?? 0);
+                        $bpur  = floatval($b_purchases[$i] ?? 0);
+                        $bqty  = intval($b_stocks[$i] ?? 0);
+
+                        if (empty($bno) && $bqty <= 0 && $brate <= 0) continue;
+
+                        if (empty($bno)) {
+                            $bno = "BAT-" . date('ymd') . "-" . ($i + 1);
+                        }
+                        if (empty($bexp)) {
+                            $bexp = date('Y-m-d', strtotime('+2 years'));
+                        }
+                        if ($brate <= 0) $brate = $trade_price;
+                        if ($bpur <= 0)  $bpur = $brate;
+                        $bstatus = ($bqty > 0) ? 'Active' : 'Exhausted';
+
+                        if ($bid > 0) {
+                            $upd_batch_stmt->execute([
+                                $bno, $bexp, $brate, $brate, $bpur, max(0, $bqty), $bstatus, $bid, $product_id
+                            ]);
+                            $recalculated_total_stock += max(0, $bqty);
+                        } else {
+                            $ins_batch_stmt->execute([
+                                $product_id, $bno, $bexp, $bpur, $brate, $brate, max(0, $bqty), max(0, $bqty)
+                            ]);
+                            $recalculated_total_stock += max(0, $bqty);
+                        }
                     }
                 }
 
-                $message = "Product '{$name}' updated successfully!";
+                // If batches were submitted, update products.current_stock to match
+                if (!empty($b_nos)) {
+                    $pdo->prepare("UPDATE products SET current_stock = ? WHERE id = ?")->execute([$recalculated_total_stock, $product_id]);
+                }
+
+                $pdo->commit();
+                $message = "Product '{$name}' and its batches updated successfully!";
                 $msg_type = "success";
 
                 // Re-fetch updated data
@@ -116,12 +170,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                 $stmt->execute([$product_id]);
                 $prod = $stmt->fetch();
 
-                // Re-fetch batch
-                $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+                // Re-fetch all batches
+                $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id ASC");
                 $b_stmt->execute([$product_id]);
-                $latest_batch = $b_stmt->fetch();
+                $existing_batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
 
             } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
                 $message = "Error: " . $e->getMessage();
                 $msg_type = "danger";
             }
@@ -208,18 +265,14 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           </select>
         </div>
 
-        <!-- Trade Price / TP (First) -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Trade Price / TP Rate (Rs.) <span class="text-danger">*</span></label>
-          <input type="number" step="0.01" min="0" name="trade_price" id="trade_price" class="form-control text-right font-weight-bold text-primary" value="<?= htmlspecialchars($prod['trade_price']) ?>" required oninput="calcEditSaleRate()">
-          <small class="text-muted">Company official TP rate</small>
-        </div>
+        <input type="hidden" name="trade_price" id="trade_price" value="<?= htmlspecialchars($prod['trade_price']) ?>">
+        <input type="hidden" name="wholesale_price" id="wholesale_price" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : ($prod['retail_price'] > 0 ? $prod['retail_price'] : $prod['trade_price'])) ?>">
 
         <!-- Sale Discount % -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Sale Discount (%)</label>
+        <div class="col-md-3 mb-3">
+          <label class="form-label font-weight-bold">Default Sale Discount (%)</label>
           <div class="input-group">
-            <input type="number" step="0.01" min="0" max="100" name="discount_percent" id="discount_percent" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['discount_percent'] ?? '0.00') ?>" onfocus="this.select()" oninput="calcEditSaleRate()">
+            <input type="number" step="0.01" min="0" max="100" name="discount_percent" id="discount_percent" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['discount_percent'] ?? '0.00') ?>" onfocus="this.select()">
             <div class="input-group-append">
               <span class="input-group-text font-weight-bold bg-light text-success">%</span>
             </div>
@@ -227,48 +280,75 @@ require_once dirname(__DIR__, 2) . '/includes/header.php';
           <small class="text-muted">Default customer discount on TP</small>
         </div>
 
-        <!-- Sale Rate (Second) -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Sale Rate (Rs.)</label>
-          <input type="number" step="0.01" min="0" name="wholesale_price" id="wholesale_price" class="form-control text-right font-weight-bold text-success" value="<?= htmlspecialchars($prod['wholesale_price'] > 0 ? $prod['wholesale_price'] : ($prod['retail_price'] > 0 ? $prod['retail_price'] : $prod['trade_price'])) ?>" onfocus="this.select()" oninput="calcEditDiscount()">
-          <small class="text-muted">Store selling rate to customers</small>
-        </div>
-
-        <!-- Current Stock (Display Only) -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Current Stock (Pcs)</label>
-          <input type="text" class="form-control text-center font-weight-bold bg-light" value="<?= htmlspecialchars($prod['current_stock']) ?> Pcs" readonly>
-          <small class="text-muted">Managed via Purchases & Sales</small>
-        </div>
-
-        <!-- Batch Number -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Batch Number</label>
-          <input type="text" name="batch_no" class="form-control font-monospace" placeholder="e.g. BT-1024" value="<?= htmlspecialchars($latest_batch['batch_no'] ?? '') ?>">
-          <small class="text-muted">Primary / Active batch number</small>
-        </div>
-
-        <!-- Expiry Date -->
-        <div class="col-md-4 mb-3">
-          <label class="form-label font-weight-bold">Expiry Date</label>
-          <input type="date" name="expiry_date" class="form-control" value="<?= htmlspecialchars(!empty($latest_batch['expiry_date']) ? date('Y-m-d', strtotime($latest_batch['expiry_date'])) : '') ?>">
-          <small class="text-muted">Expiry date of the batch</small>
+        <!-- Current Stock (Total across all batches) -->
+        <div class="col-md-3 mb-3">
+          <label class="form-label font-weight-bold">Total Stock (Pcs)</label>
+          <input type="text" id="dispTotalStock" class="form-control text-center font-weight-bold bg-light" value="<?= htmlspecialchars($prod['current_stock']) ?> Pcs" readonly>
+          <small class="text-muted">Calculated as sum of all batch stocks</small>
         </div>
 
         <!-- Reorder Level -->
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
           <label class="form-label font-weight-bold">Low Stock Alert (Pcs)</label>
           <input type="number" min="0" name="reorder_level" class="form-control text-center" value="<?= htmlspecialchars($prod['reorder_level'] ?? 10) ?>">
           <small class="text-muted">Alert when stock falls below this</small>
         </div>
 
         <!-- Status -->
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
           <label class="form-label font-weight-bold">Status</label>
           <select name="status" class="form-control">
             <option value="Active" <?= ($prod['status'] === 'Active') ? 'selected' : '' ?>>Active</option>
             <option value="Inactive" <?= ($prod['status'] === 'Inactive') ? 'selected' : '' ?>>Inactive</option>
           </select>
+        </div>
+      </div>
+
+      <!-- Multiple Batches & Stock Management Section -->
+      <div class="card border mb-3 shadow-sm" style="border-radius: 8px;">
+        <div class="card-header bg-light py-2 d-flex flex-wrap justify-content-between align-items-center">
+          <div>
+            <h6 class="m-0 font-weight-bold text-primary">
+              <i class="fas fa-layer-group mr-1"></i> Product Batches & Stock Management
+            </h6>
+            <small class="text-muted">Manage multiple batches with their individual rates and stocks</small>
+          </div>
+          <button type="button" class="btn btn-sm btn-primary font-weight-bold" onclick="addEditBatchRow()">
+            <i class="fas fa-plus mr-1"></i> Add Another Batch
+          </button>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-bordered table-hover mb-0" id="editBatchesTable">
+              <thead class="bg-light text-dark font-weight-bold" style="font-size: 13px;">
+                <tr>
+                  <th style="width: 45px;" class="text-center">#</th>
+                  <th style="min-width: 170px;">Batch Number <span class="text-danger">*</span></th>
+                  <th style="min-width: 140px;">Expiry Date <span class="text-danger">*</span></th>
+                  <th style="min-width: 150px;" class="text-right">Batch Rate / TP (Rs.) <span class="text-danger">*</span></th>
+                  <th style="min-width: 140px;" class="text-right">Purchase Rate (Rs.)</th>
+                  <th style="min-width: 130px;" class="text-center">Current Stock (Pcs)</th>
+                  <th style="width: 50px;" class="text-center"></th>
+                </tr>
+              </thead>
+              <tbody id="editBatchesTbody">
+                <!-- Batch rows populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card-footer bg-white py-2 d-flex flex-wrap justify-content-between align-items-center">
+          <div class="text-muted small">
+            <i class="fas fa-info-circle text-info mr-1"></i> Each batch has its own independent rate. In sales invoices, selecting a batch loads that specific rate.
+          </div>
+          <div class="d-flex align-items-center">
+            <span class="mr-3 font-weight-bold text-dark">
+              Total Batches: <span class="badge badge-primary px-2" id="editTotalBatchesBadge"><?= count($existing_batches) ?></span>
+            </span>
+            <span class="font-weight-bold text-dark">
+              Total Stock: <span class="badge badge-success px-2 font-monospace" id="editTotalStockBadge"><?= intval($prod['current_stock']) ?> Pcs</span>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -289,30 +369,118 @@ document.addEventListener('focus', function(e) {
     }
 }, true);
 
-function calcEditSaleRate() {
-    const tp = parseFloat(document.getElementById('trade_price')?.value) || 0;
-    const disc = parseFloat(document.getElementById('discount_percent')?.value) || 0;
-    const netSale = tp > 0 ? (tp * (1 - (disc / 100))) : 0;
-    const saleInput = document.getElementById('wholesale_price');
-    if (saleInput) {
-        saleInput.value = netSale > 0 ? netSale.toFixed(2) : (tp > 0 ? tp.toFixed(2) : '0.00');
+const existingBatchesData = <?= json_encode($existing_batches) ?>;
+let editBatchCounter = 0;
+
+function addEditBatchRow(b = null) {
+    editBatchCounter++;
+    const tbody = document.getElementById('editBatchesTbody');
+    if (!tbody) return;
+
+    const mainTp = parseFloat(document.getElementById('trade_price')?.value) || 0;
+    const batchId = b ? (b.id || 0) : 0;
+    const batchNo = b ? (b.batch_no || '') : ('BT-' + String(editBatchCounter).padStart(2, '0'));
+    const expiry = (b && b.expiry_date && b.expiry_date !== '0000-00-00') ? b.expiry_date : '<?= date('Y-m-d', strtotime('+2 years')) ?>';
+    const rate = b ? (parseFloat(b.trade_price) > 0 ? parseFloat(b.trade_price).toFixed(2) : (mainTp > 0 ? mainTp.toFixed(2) : '0.00')) : (mainTp > 0 ? mainTp.toFixed(2) : '0.00');
+    const purRate = b ? (parseFloat(b.purchase_price) > 0 ? parseFloat(b.purchase_price).toFixed(2) : rate) : rate;
+    const stock = b ? parseInt(b.current_stock || 0) : 0;
+
+    const tr = document.createElement('tr');
+    tr.id = 'editBatchRow_' + editBatchCounter;
+    tr.innerHTML = `
+        <td class="text-center font-weight-bold text-muted align-middle">
+            <span class="batch-index">${editBatchCounter}</span>
+            <input type="hidden" name="batch_id[]" value="${batchId}">
+        </td>
+        <td>
+            <input type="text" name="batch_no[]" class="form-control form-control-sm font-monospace font-weight-bold" placeholder="e.g. BT-01" value="${escapeHtml(batchNo)}" required>
+        </td>
+        <td>
+            <input type="date" name="batch_expiry[]" class="form-control form-control-sm" value="${expiry}" required>
+        </td>
+        <td>
+            <input type="number" step="0.01" min="0" name="batch_rate[]" class="form-control form-control-sm text-right font-weight-bold batch-rate-input text-primary" placeholder="0.00" value="${rate}" onfocus="this.select()" oninput="updateEditBatchTotals()" required>
+        </td>
+        <td>
+            <input type="number" step="0.01" min="0" name="batch_purchase_rate[]" class="form-control form-control-sm text-right batch-pur-input" placeholder="0.00" value="${purRate}" onfocus="this.select()">
+        </td>
+        <td>
+            <input type="number" min="0" name="batch_stock[]" class="form-control form-control-sm text-center font-weight-bold batch-stock-input" placeholder="0" value="${stock}" onfocus="this.select()" oninput="updateEditBatchTotals()">
+        </td>
+        <td class="text-center align-middle">
+            <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="removeEditBatchRow(${editBatchCounter}, ${batchId})" title="Remove batch">
+                <i class="fas fa-trash-alt"></i>
+            </button>
+        </td>
+    `;
+    tbody.appendChild(tr);
+    updateEditBatchIndices();
+    updateEditBatchTotals();
+}
+
+function removeEditBatchRow(rowId, batchId) {
+    const row = document.getElementById('editBatchRow_' + rowId);
+    const tbody = document.getElementById('editBatchesTbody');
+    if (row && tbody) {
+        if (tbody.querySelectorAll('tr').length <= 1) {
+            alert('At least one batch row is required.');
+            return;
+        }
+        if (batchId > 0) {
+            if (!confirm('This batch exists in the database. Are you sure you want to remove it from this list? (Its remaining stock will be removed upon saving)')) {
+                return;
+            }
+        }
+        row.remove();
+        updateEditBatchIndices();
+        updateEditBatchTotals();
     }
 }
 
-function calcEditDiscount() {
-    const tp = parseFloat(document.getElementById('trade_price')?.value) || 0;
-    const sale = parseFloat(document.getElementById('wholesale_price')?.value) || 0;
-    const discInput = document.getElementById('discount_percent');
-    if (!discInput) return;
+function updateEditBatchIndices() {
+    const rows = document.querySelectorAll('#editBatchesTbody tr');
+    rows.forEach((r, idx) => {
+        const span = r.querySelector('.batch-index');
+        if (span) span.textContent = idx + 1;
+    });
+    const badge = document.getElementById('editTotalBatchesBadge');
+    if (badge) badge.textContent = rows.length;
+}
 
-    if (tp > 0) {
-        const diff = tp - sale;
-        const disc = (diff / tp) * 100;
-        discInput.value = (disc > 0 ? disc : 0).toFixed(2);
+function updateEditBatchTotals() {
+    let totalStock = 0;
+    const stockInputs = document.querySelectorAll('.batch-stock-input');
+    stockInputs.forEach(inp => {
+        totalStock += parseInt(inp.value || 0) || 0;
+    });
+    const stockBadge = document.getElementById('editTotalStockBadge');
+    if (stockBadge) stockBadge.textContent = totalStock + ' Pcs';
+    const dispStock = document.getElementById('dispTotalStock');
+    if (dispStock) dispStock.value = totalStock + ' Pcs';
+
+    // Synchronize product master trade_price from the first batch's rate
+    const firstRateInput = document.querySelector('#editBatchesTbody tr:first-child .batch-rate-input');
+    const firstRate = firstRateInput ? (parseFloat(firstRateInput.value) || 0) : 0;
+    const hiddenTp = document.getElementById('trade_price');
+    const hiddenWholesale = document.getElementById('wholesale_price');
+    if (hiddenTp && firstRate > 0) {
+        hiddenTp.value = firstRate.toFixed(2);
+        if (hiddenWholesale) hiddenWholesale.value = firstRate.toFixed(2);
+    }
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (existingBatchesData && existingBatchesData.length > 0) {
+        existingBatchesData.forEach(b => addEditBatchRow(b));
     } else {
-        discInput.value = '0.00';
+        addEditBatchRow(null);
     }
-}
+});
 </script>
 
 <?php require_once dirname(__DIR__, 2) . '/includes/footer.php'; ?>

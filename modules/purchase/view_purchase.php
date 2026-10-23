@@ -45,12 +45,19 @@ if ($db_connected && $pdo && $purchase_id > 0) {
             $stmt_i->execute([$purchase_id]);
             $items = $stmt_i->fetchAll();
 
-            // Calculate gross amount and total discounts received (Bonus + Disc + Bill Disc)
+            // Calculate gross amount, batch statistics and total discounts received (Bonus + Disc + Bill Disc)
             $gross_sum = 0;
+            $distinct_batches = [];
+            $total_received_qty = 0;
             foreach ($items as $it) {
                 $tp_base = floatval($it['purchase_price'] > 0 ? $it['purchase_price'] : ($it['trade_price'] > 0 ? $it['trade_price'] : ($it['prod_trade_price'] ?? 0)));
                 $gross_sum += ($it['quantity'] * $tp_base);
+                if (!empty($it['batch_no'])) {
+                    $distinct_batches[$it['batch_no']] = true;
+                }
+                $total_received_qty += (intval($it['quantity']) + intval($it['bonus_quantity'] ?? 0));
             }
+            $distinct_batch_count = count($distinct_batches);
             $subtotal_val = floatval($purchase['subtotal'] ?? 0);
             $row_disc_total = max(0, $gross_sum - $subtotal_val);
             $bill_disc_val = floatval($purchase['discount_amount'] ?? 0);
@@ -233,7 +240,7 @@ if (!$purchase) {
             <div class="col-md-6">
                 <div class="meta-box h-100">
                     <div class="fw-bold text-dark mb-2 d-flex align-items-center gap-2">
-                        <i class="fa-solid fa-circle-info text-primary"></i> Receiving & Verification
+                        <i class="fas fa-info-circle text-primary"></i> Receiving & Verification
                     </div>
                     <div class="small text-muted mb-1">Bill Reference: <strong><?= htmlspecialchars($purchase['bill_no']) ?></strong></div>
                     <div class="small text-muted mb-1">Created By: <strong><?= htmlspecialchars($purchase['created_by_name'] ?? 'Admin') ?></strong></div>
@@ -242,6 +249,17 @@ if (!$purchase) {
                             <strong>Remarks:</strong> <?= nl2br(htmlspecialchars($purchase['notes'])) ?>
                         </div>
                     <?php endif; ?>
+                    <div class="d-flex flex-wrap gap-2 mt-3 pt-2 border-top">
+                        <span class="badge bg-light text-dark border font-monospace px-2 py-1">
+                            <i class="fas fa-boxes text-primary mr-1"></i> <?= count($items) ?> Lines
+                        </span>
+                        <span class="badge bg-light text-dark border font-monospace px-2 py-1">
+                            <i class="fas fa-tags text-success mr-1"></i> <?= $distinct_batch_count ?> Distinct <?= $distinct_batch_count == 1 ? 'Batch' : 'Batches' ?>
+                        </span>
+                        <span class="badge bg-light text-dark border font-monospace px-2 py-1">
+                            <i class="fas fa-cube text-info mr-1"></i> <?= number_format($total_received_qty) ?> Pcs Inward
+                        </span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -251,16 +269,18 @@ if (!$purchase) {
             <table class="table align-middle">
                 <thead>
                     <tr>
-                        <th style="width: 45px;">#</th>
+                        <th style="width: 40px;">#</th>
                         <th>Medicine / Product Name</th>
-                        <th class="text-center">Inward Qty</th>
-                        <th class="text-center">Bonus</th>
-                        <th class="text-end">Trade Price (TP)</th>
-                        <th class="text-center text-success">TP Disc %</th>
-                        <th class="text-center text-primary">Sale Disc %</th>
-                        <th class="text-end text-primary">Sale Rate</th>
-                        <th class="text-center">GST %</th>
-                        <th class="text-end">Total (Rs.)</th>
+                        <th class="text-center" style="width: 125px;">Batch #</th>
+                        <th class="text-center" style="width: 110px;">Expiry Date</th>
+                        <th class="text-center" style="width: 90px;">Inward Qty</th>
+                        <th class="text-center" style="width: 75px;">Bonus</th>
+                        <th class="text-end" style="width: 110px;">Trade Price (TP)</th>
+                        <th class="text-center text-success" style="width: 90px;">TP Disc %</th>
+                        <th class="text-center text-primary" style="width: 90px;">Sale Disc %</th>
+                        <th class="text-end text-primary" style="width: 110px;">Sale Rate</th>
+                        <th class="text-center" style="width: 70px;">GST %</th>
+                        <th class="text-end" style="width: 115px;">Total (Rs.)</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -276,13 +296,35 @@ if (!$purchase) {
                             $sale_rate = max(0, $tp_val * (1 - ($sale_disc / 100)));
                         }
                         $net_cost = max(0, $tp_val * (1 - ($tp_disc / 100)));
+                        $exp_str = $item['expiry_date'] ?? '';
+                        $exp_display = (!empty($exp_str) && $exp_str !== '0000-00-00') ? date('d-m-Y', strtotime($exp_str)) : '—';
+                        $is_exp = (!empty($exp_str) && $exp_str !== '0000-00-00' && strtotime($exp_str) < time());
                     ?>
                         <tr>
                             <td><?= $idx++ ?></td>
                             <td>
                                 <div class="fw-bold text-dark fs-6"><?= htmlspecialchars($item['product_name']) ?></div>
-                                <span class="badge bg-light text-muted border font-monospace"><?= htmlspecialchars($item['product_code']) ?></span>
-                                <span class="text-muted small ms-1"><?= htmlspecialchars($item['company_name'] ?? '') ?></span>
+                                <div class="d-flex align-items-center gap-1 mt-1">
+                                    <span class="badge bg-light text-muted border font-monospace"><?= htmlspecialchars($item['product_code']) ?></span>
+                                    <?php if (!empty($item['company_name'])): ?>
+                                        <span class="text-muted small ms-1"><?= htmlspecialchars($item['company_name']) ?></span>
+                                    <?php endif; ?>
+                                    <a href="../product/product_batches.php?product_id=<?= $item['product_id'] ?>" 
+                                       class="badge bg-primary-subtle text-primary border border-primary-subtle text-decoration-none ms-1" 
+                                       title="View all batches for this product" target="_blank">
+                                        <i class="fas fa-layer-group me-1"></i>Batches
+                                    </a>
+                                </div>
+                            </td>
+                            <td class="text-center">
+                                <span class="badge bg-light text-dark border font-monospace fw-bold px-2 py-1" style="font-size: 0.85rem;">
+                                    <?= htmlspecialchars(!empty($item['batch_no']) ? $item['batch_no'] : 'DEFAULT') ?>
+                                </span>
+                            </td>
+                            <td class="text-center">
+                                <span class="font-monospace <?= $is_exp ? 'text-danger fw-bold' : 'text-muted' ?> small">
+                                    <?= $exp_display ?>
+                                </span>
                             </td>
                             <td class="text-center">
                                 <span class="fw-bold text-dark"><?= number_format($item['quantity']) ?></span>

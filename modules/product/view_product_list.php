@@ -192,7 +192,8 @@ if ($db_connected && $pdo) {
                     (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
                     (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
                     (SELECT pi.expiry_date FROM purchase_items pi WHERE pi.product_id = p.id AND pi.expiry_date IS NOT NULL ORDER BY pi.id DESC LIMIT 1)
-                ) as expiry_date
+                ) as expiry_date,
+                (SELECT COUNT(*) FROM product_batches pb WHERE pb.product_id = p.id) as batch_count
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
@@ -237,27 +238,27 @@ if ($db_connected && $pdo) {
     .kpi-metric-card {
         background: #ffffff;
         border: 1px solid var(--theme-border);
-        border-radius: 14px;
-        padding: 18px 20px;
+        border-radius: 12px;
+        padding: 12px 18px;
         display: flex;
         align-items: center;
-        gap: 16px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+        gap: 14px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02);
         transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
     .kpi-metric-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.05);
     }
 
     .kpi-icon-box {
-        width: 50px;
-        height: 50px;
-        border-radius: 12px;
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 1.35rem;
+        font-size: 1.25rem;
         flex-shrink: 0;
     }
     .icon-primary { background: #e0f2fe; color: #0284c7; }
@@ -270,17 +271,17 @@ if ($db_connected && $pdo) {
         background: #ffffff;
         border: 1px solid var(--theme-border);
         border-radius: 12px;
-        padding: 16px 20px;
+        padding: 12px 16px;
         box-shadow: 0 1px 4px rgba(0,0,0,0.02);
-        margin-bottom: 22px;
+        margin-bottom: 16px;
     }
 
     /* Catalog Table */
     .catalog-card {
         background: #ffffff;
         border: 1px solid var(--theme-border);
-        border-radius: 14px;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
         overflow: hidden;
     }
 
@@ -292,17 +293,17 @@ if ($db_connected && $pdo) {
         background-color: #f8fafc;
         border-bottom: 2px solid var(--theme-border);
         color: #475569;
-        font-size: 0.78rem;
+        font-size: 0.76rem;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         font-weight: 700;
-        padding: 14px 16px;
+        padding: 10px 14px;
         vertical-align: middle;
         white-space: nowrap;
     }
 
     .catalog-table tbody td {
-        padding: 14px 16px;
+        padding: 9px 14px;
         font-size: 0.88rem;
         color: #1e293b;
         vertical-align: middle;
@@ -362,6 +363,19 @@ if ($db_connected && $pdo) {
         background: #f1f5f9;
         border-color: #cbd5e1;
         color: #1e293b;
+    }
+    .action-btn.btn-batches {
+        background: #ecfdf5;
+        border-color: #a7f3d0;
+        color: #059669;
+    }
+    .action-btn.btn-batches:hover {
+        background: #059669;
+        border-color: #059669;
+        color: #ffffff !important;
+    }
+    .action-btn.btn-batches:hover i {
+        color: #ffffff !important;
     }
     .action-btn.btn-view {
         background: #f0f9ff;
@@ -443,7 +457,7 @@ if ($db_connected && $pdo) {
 <?php endif; ?>
 
 <!-- KPI Metric Summary Row -->
-<div class="row g-3 mb-4">
+<div class="row g-3 mb-3">
     <div class="col-sm-6 col-lg-3">
         <div class="kpi-metric-card">
             <div class="kpi-icon-box icon-primary">
@@ -496,14 +510,14 @@ if ($db_connected && $pdo) {
 <!-- Search & Filtering Bar -->
 <div class="filter-card">
     <form method="GET" action="" class="row g-2 align-items-center">
-        <div class="col-md-4">
+        <div class="col-xl-3 col-lg-3 col-md-4">
             <div class="input-group input-group-sm">
                 <span class="input-group-text bg-light border-end-0"><i class="fa-solid fa-search text-muted"></i></span>
                 <input type="text" name="search" class="form-control border-start-0" placeholder="Search Brand name, Product code..." value="<?= htmlspecialchars($search) ?>">
             </div>
         </div>
 
-        <div class="col-md-3">
+        <div class="col-xl-3 col-lg-3 col-md-4">
             <select name="company_id" class="form-select form-select-sm">
                 <option value="">-- All Companies / Brands --</option>
                 <?php foreach ($companies as $c): ?>
@@ -514,7 +528,7 @@ if ($db_connected && $pdo) {
             </select>
         </div>
 
-        <div class="col-md-2">
+        <div class="col-xl-2 col-lg-2 col-md-4">
             <select name="category_id" class="form-select form-select-sm">
                 <option value="">-- All Categories --</option>
                 <?php foreach ($categories as $cat): ?>
@@ -525,7 +539,7 @@ if ($db_connected && $pdo) {
             </select>
         </div>
 
-        <div class="col-md-2">
+        <div class="col-xl-2 col-lg-2 col-md-6">
             <select name="stock_status" class="form-select form-select-sm">
                 <option value="">-- All Stock Status --</option>
                 <option value="in_stock" <?= ($stock_status === 'in_stock') ? 'selected' : '' ?>>In Stock</option>
@@ -534,7 +548,7 @@ if ($db_connected && $pdo) {
             </select>
         </div>
 
-        <div class="col-md-2 d-flex gap-1">
+        <div class="col-xl-2 col-lg-2 col-md-6 d-flex gap-1">
             <button type="submit" class="btn btn-sm btn-primary w-100 fw-bold" title="Filter Records">
                 <i class="fa-solid fa-filter me-1"></i> Filter
             </button>
@@ -554,21 +568,19 @@ if ($db_connected && $pdo) {
         <table class="table catalog-table">
             <thead>
                 <tr>
-                    <th style="width: 110px;">Product Code</th>
-                    <th>Medicine / Product Name</th>
-                    <th>Company / Category</th>
-                    <th class="text-center" style="width: 125px;">Batch / Expiry</th>
-                    <th class="text-end">TP / Sale Rate</th>
-                    <th class="text-center">Stock on Hand</th>
-                    <?php if ($can_manage_products): ?>
-                    <th class="text-center action-col" style="width: 115px;">Actions</th>
-                    <?php endif; ?>
+                    <th style="width: 130px;">Product Code</th>
+                    <th style="width: 28%;">Product Name</th>
+                    <th style="width: 22%;">Company</th>
+                    <th style="width: 16%;">Category</th>
+                    <th class="text-center" style="width: 14%;">Total Batches</th>
+                    <th class="text-center" style="width: 14%;">Total Quantity</th>
+                    <th class="text-center action-col" style="width: 110px;">Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($products)): ?>
                     <tr>
-                        <td colspan="<?= $can_manage_products ? 7 : 6 ?>" class="text-center py-5 text-muted">
+                        <td colspan="7" class="text-center py-5 text-muted">
                             <i class="fa-solid fa-box-open fs-1 text-secondary opacity-50 mb-3 d-block"></i>
                             <h6 class="fw-bold text-dark">No products found</h6>
                             <p class="small text-muted mb-3">No products match your current filters or no products have been added yet.</p>
@@ -582,126 +594,69 @@ if ($db_connected && $pdo) {
                 <?php else: ?>
                     <?php foreach ($products as $p): ?>
                         <?php
-                            $cost = floatval($p['purchase_price'] ?? 0);
-                            $tp   = floatval($p['trade_price'] ?? 0);
-                            $sale = floatval($p['wholesale_price'] > 0 ? $p['wholesale_price'] : $tp);
-                            $profit_pack = $sale - $cost;
                             $cur_stock = floatval($p['current_stock'] ?? 0);
-                            $p_box  = max(1, intval($p['packs_per_box'] ?? 10));
-                            $t_pack = max(1, intval($p['tablets_per_pack'] ?? 10));
-                            $tot_tabs = max(1, intval($p['total_tablets_per_box'] ?? ($p_box * $t_pack)));
-                            $stock_boxes = $cur_stock / $p_box;
-                            $stock_tabs  = $stock_boxes * $tot_tabs;
+                            $b_count = intval($p['batch_count'] ?? 0);
+                            $qty_disp = ($cur_stock == intval($cur_stock)) ? intval($cur_stock) : $cur_stock;
+                            $reorder = floatval($p['reorder_level'] ?? 10);
                         ?>
                         <tr>
                             <td>
-                                <span class="badge bg-light text-dark border font-monospace px-2 py-1">
+                                <span class="badge bg-light text-secondary border font-monospace px-2 py-1" style="font-size: 0.8rem;">
                                     <?= htmlspecialchars($p['product_code']) ?>
                                 </span>
                             </td>
 
                             <td>
-                                <div class="fw-bold text-dark fs-6"><?= htmlspecialchars($p['name']) ?></div>
+                                <div class="fw-bold text-dark" style="font-size: 0.90rem;"><?= htmlspecialchars($p['name']) ?></div>
                             </td>
 
                             <td>
-                                <div class="fw-semibold text-dark"><?= htmlspecialchars(!empty($p['company_name']) ? $p['company_name'] : '—') ?></div>
-                                <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.72rem;">
-                                    <?= htmlspecialchars(!empty($p['category_name']) ? $p['category_name'] : '—') ?>
-                                </span>
+                                <div class="text-secondary fw-medium"><?= htmlspecialchars(!empty($p['company_name']) ? $p['company_name'] : '—') ?></div>
+                            </td>
+
+                            <td>
+                                <span class="text-secondary"><?= htmlspecialchars(!empty($p['category_name']) ? $p['category_name'] : '—') ?></span>
                             </td>
 
                             <td class="text-center">
-                                <?php if (!empty($p['batch_no'])): ?>
-                                    <span class="badge bg-light text-primary border font-monospace px-2 py-1">
-                                        <?= htmlspecialchars($p['batch_no']) ?>
-                                    </span>
-                                    <?php if (!empty($p['expiry_date'])): ?>
-                                        <div class="text-muted mt-1" style="font-size: 0.72rem;">
-                                            Exp: <?= date('d-M-Y', strtotime($p['expiry_date'])) ?>
-                                        </div>
-                                    <?php endif; ?>
-                                <?php else: ?>
-                                    <span class="text-muted small">—</span>
-                                <?php endif; ?>
-                            </td>
-
-                            <td class="text-end">
-                                <div class="fw-bold text-primary font-monospace">Rs. <?= number_format($tp, 2) ?></div>
-                                <div class="small text-muted font-monospace">Sale: Rs. <?= number_format($sale, 2) ?></div>
-                                <?php if (floatval($p['discount_percent'] ?? 0) > 0): ?>
-                                    <span class="badge bg-success-subtle text-success border border-success-subtle mt-1" style="font-size: 0.70rem;">
-                                        <?= floatval($p['discount_percent']) ?>% Disc
-                                    </span>
-                                <?php endif; ?>
+                                <span class="text-dark fw-semibold"><?= $b_count ?> <?= $b_count == 1 ? 'Batch' : 'Batches' ?></span>
                             </td>
 
                             <td class="text-center">
                                 <?php if ($cur_stock <= 0): ?>
-                                    <span class="badge bg-danger px-2 py-1">Out of Stock (0)</span>
-                                <?php elseif ($cur_stock <= ($p['reorder_level'] ?? 10)): ?>
-                                    <span class="badge bg-warning text-dark px-2 py-1">
-                                        <?= $cur_stock ?> Pcs (Low)
-                                    </span>
+                                    <span class="text-danger fw-bold">0 Pcs (Out)</span>
+                                <?php elseif ($cur_stock <= $reorder): ?>
+                                    <span class="text-danger fw-bold"><?= $qty_disp ?> Pcs (Low)</span>
                                 <?php else: ?>
-                                    <span class="badge bg-success px-2 py-1 fw-bold">
-                                        <?= $cur_stock ?> Pcs
-                                    </span>
+                                    <span class="text-dark fw-semibold"><?= $qty_disp ?> Pcs</span>
                                 <?php endif; ?>
                             </td>
 
-                            <?php if ($can_manage_products): ?>
                             <td class="text-center action-col">
                                 <div class="d-flex align-items-center justify-content-center gap-1">
-                                    <?php
-                                        $prod_json = htmlspecialchars(json_encode([
-                                            "id" => $p["id"],
-                                            "code" => $p["product_code"],
-                                            "name" => $p["name"],
-                                            "company" => !empty($p["company_name"]) ? $p["company_name"] : "Not Assigned",
-                                            "category" => !empty($p["category_name"]) ? $p["category_name"] : "Not Assigned",
-                                            "batch" => !empty($p["batch_no"]) ? $p["batch_no"] : "—",
-                                            "expiry" => (!empty($p["expiry_date"]) && $p["expiry_date"] !== "0000-00-00") ? date("d-M-Y", strtotime($p["expiry_date"])) : "—",
-                                            "raw_expiry" => $p["expiry_date"] ?? "",
-                                            "stock_unit" => $p["stock_unit"] ?? "Pcs",
-                                            "cost" => $cost,
-                                            "tp" => $tp,
-                                            "disc" => floatval($p["discount_percent"] ?? 0),
-                                            "sale" => $sale,
-                                            "retail" => floatval($p["retail_price"] ?? 0),
-                                            "profit" => $profit_pack,
-                                            "stock" => $cur_stock,
-                                            "opening_stock" => floatval($p["opening_stock"] ?? 0),
-                                            "reorder" => $p["reorder_level"] ?? 10,
-                                            "location_rack" => $p["location_rack"] ?? "",
-                                            "barcode" => $p["barcode"] ?? "",
-                                            "status" => $p["status"] ?? "Active"
-                                        ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), ENT_QUOTES, "UTF-8");
-                                    ?>
-                                    <!-- 1. View Product Details -->
-                                    <button type="button" 
-                                            class="action-btn btn-view" 
-                                            title="View Product Details" 
-                                            data-product='<?= $prod_json ?>'
-                                            onclick="showProductModal(this)">
-                                        <i class="fa-solid fa-eye text-primary"></i>
-                                    </button>
+                                    <!-- View Batches Button -->
+                                    <a href="product_batches.php?product_id=<?= $p['id'] ?>" 
+                                       class="action-btn btn-batches" 
+                                       title="View Batches (<?= $b_count ?>)">
+                                        <i class="fa-solid fa-layer-group text-success"></i>
+                                    </a>
 
-                                    <!-- 2. Edit Product -->
+                                    <?php if ($can_manage_products): ?>
+                                    <!-- Edit Product -->
                                     <a href="edit_product.php?id=<?= $p['id'] ?>" class="action-btn btn-edit" title="Edit Product Details">
                                         <i class="fa-solid fa-edit text-warning"></i>
                                     </a>
 
-                                    <!-- 3. Delete Product -->
+                                    <!-- Delete Product -->
                                     <a href="view_product_list.php?action=delete&id=<?= $p['id'] ?>" 
                                        class="action-btn btn-delete" 
                                        title="Delete Product"
                                        onclick="return confirm('Are you sure you want to delete product [<?= htmlspecialchars(addslashes($p['name'])) ?>]?');">
                                         <i class="fa-solid fa-trash text-danger"></i>
                                     </a>
+                                    <?php endif; ?>
                                 </div>
                             </td>
-                            <?php endif; ?>
                         </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>

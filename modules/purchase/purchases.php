@@ -82,7 +82,8 @@ $where = ["1=1"];
 $params = [];
 
 if (!empty($search)) {
-    $where[] = "(p.bill_no LIKE ? OR s.name LIKE ? OR s.company_name LIKE ?)";
+    $where[] = "(p.bill_no LIKE ? OR s.name LIKE ? OR s.company_name LIKE ? OR EXISTS (SELECT 1 FROM purchase_items pi_srch WHERE pi_srch.purchase_id = p.id AND pi_srch.batch_no LIKE ?))";
+    $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
     $params[] = "%$search%";
@@ -147,6 +148,7 @@ if ($db_connected && $pdo) {
                 s.company_name as supplier_company,
                 s.phone as supplier_phone,
                 COUNT(pi.id) as item_count,
+                COUNT(DISTINCT pi.batch_no) as batch_count,
                 SUM(pi.quantity + pi.bonus_quantity) as total_packs_received,
                 SUM(pi.quantity * pi.purchase_price) as gross_amount
             FROM purchases p
@@ -507,8 +509,15 @@ if ($db_connected && $pdo) {
                                 <?php endif; ?>
                             </td>
 
-                            <td class="text-center fw-semibold text-dark">
-                                <?= number_format($pur['total_packs_received'] ?? 0) ?>
+                            <td class="text-center">
+                                <span class="fw-bold text-dark"><?= number_format($pur['total_packs_received'] ?? 0) ?> Pcs</span>
+                                <?php if (!empty($pur['batch_count']) && $pur['batch_count'] > 0): ?>
+                                    <div>
+                                        <span class="badge bg-light text-secondary border font-monospace" style="font-size:0.70rem;">
+                                            <i class="fas fa-tags text-muted mr-1"></i><?= $pur['batch_count'] ?> <?= $pur['batch_count'] == 1 ? 'Batch' : 'Batches' ?>
+                                        </span>
+                                    </div>
+                                <?php endif; ?>
                             </td>
 
                             <?php

@@ -494,7 +494,12 @@ body { font-family:'Poppins',sans-serif; background:#f1f5f9; font-size:13px; col
           <?php if ($generic): ?><span class="text-muted" style="font-size:11.5px;"> — <?= $generic ?></span><?php endif; ?>
           <?php if ($company_nm): ?><br><small class="text-muted" style="font-size:11px;"><?= $company_nm ?></small><?php endif; ?>
         </td>
-        <td class="text-center font-monospace" style="white-space:nowrap; font-size:11px; font-weight:600;"><?= $batch ?></td>
+        <td class="text-center font-monospace" style="white-space:nowrap; font-size:11px; font-weight:600;">
+          <?= $batch ?>
+          <?php if (!empty($it['expiry_date']) && $it['expiry_date'] !== '0000-00-00'): ?>
+            <br><small class="text-muted" style="font-size:10px;">Exp: <?= htmlspecialchars($it['expiry_date']) ?></small>
+          <?php endif; ?>
+        </td>
         <td class="text-center font-weight-bold"><?= number_format($qty) ?></td>
         <td class="text-right font-monospace"><?= number_format($rate, 2) ?></td>
         <td class="text-center text-muted"><?= $disc > 0 ? $disc.'%' : '-' ?></td>
