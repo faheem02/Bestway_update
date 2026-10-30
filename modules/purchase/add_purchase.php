@@ -85,6 +85,18 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_supplier') {
     exit;
 }
 
+// Determine TP Discount SQL expression (from products table if column exists, or from latest purchase_items)
+$has_tp_disc_col = false;
+if ($db_connected && $pdo) {
+    try {
+        $chk = $pdo->query("SHOW COLUMNS FROM products LIKE 'tp_discount'")->fetch();
+        if ($chk) $has_tp_disc_col = true;
+    } catch (Exception $e) {}
+}
+$tp_disc_sql = $has_tp_disc_col
+    ? "COALESCE(NULLIF(p.tp_discount, 0), (SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent IS NOT NULL ORDER BY pi.id DESC LIMIT 1), 0.00) as tp_discount"
+    : "COALESCE((SELECT pi.discount_percent FROM purchase_items pi WHERE pi.product_id = p.id AND pi.discount_percent IS NOT NULL ORDER BY pi.id DESC LIMIT 1), 0.00) as tp_discount";
+
 // Live Search Medicine & Brand AJAX Endpoint
 if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
     header('Content-Type: application/json');
@@ -98,7 +110,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
                         p.id, p.product_code, p.name, p.purchase_price, p.trade_price, p.discount_percent,
                         p.stock_unit, p.packs_per_box, p.tablets_per_pack, p.current_stock,
                         c.name as company_name, cat.name as category_name,
-                        u.name as base_unit_name, u.short_name as base_unit_short
+                        u.name as base_unit_name, u.short_name as base_unit_short,
+                        {$tp_disc_sql}
                     FROM products p
                     LEFT JOIN companies c ON p.company_id = c.id
                     LEFT JOIN categories cat ON p.category_id = cat.id
@@ -114,7 +127,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
                         p.id, p.product_code, p.name, p.purchase_price, p.trade_price, p.discount_percent,
                         p.stock_unit, p.packs_per_box, p.tablets_per_pack, p.current_stock,
                         c.name as company_name, cat.name as category_name,
-                        u.name as base_unit_name, u.short_name as base_unit_short
+                        u.name as base_unit_name, u.short_name as base_unit_short,
+                        {$tp_disc_sql}
                     FROM products p
                     LEFT JOIN companies c ON p.company_id = c.id
                     LEFT JOIN categories cat ON p.category_id = cat.id
@@ -245,8 +259,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     UPDATE products 
                     SET current_stock = current_stock + ?, 
                         purchase_price = ?,
+                        trade_price = CASE WHEN ? > 0 THEN ? ELSE trade_price END,
                         discount_percent = CASE WHEN ? = 1 THEN ? ELSE discount_percent END,
-                        retail_price = CASE WHEN ? > 0 THEN ? ELSE retail_price END
+                        max_discount_percent = CASE WHEN ? = 1 THEN ? ELSE max_discount_percent END,
+                        retail_price = CASE WHEN ? = 1 THEN ? ELSE retail_price END,
+                        wholesale_price = CASE WHEN ? = 1 THEN ? ELSE wholesale_price END
                     WHERE id = ?
                 ");
 
@@ -272,6 +289,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         initial_quantity, current_stock, status
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active')
                 ");
+                $stmt_sync_batches = $pdo->prepare("
+                    UPDATE product_batches 
+                    SET retail_price = ROUND(trade_price * (1 - ? / 100), 2) 
+                    WHERE product_id = ? AND trade_price > 0
+                ");
 
                 $impacted_pids = [];
 
@@ -288,27 +310,28 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     $raw_bonus       = max(0, intval($itm['bonus_quantity'] ?? 0));
                     $all_total_stock = $raw_qty + $raw_bonus; // Total physical stock inward (purchased + bonus)
 
-                    // Rate entered by user (Purchase Cost to supplier)
+                    // Rate entered by user (Purchase Cost / TP to supplier)
                     $p_cost         = floatval($itm['purchase_price'] ?? 0);
-                    // tp_ JS field is updated to calcSalePrice when user sets Sale Discount %; use it if available
                     $form_tp        = floatval($itm['trade_price'] ?? 0);
                     $has_sale_disc  = isset($itm['sale_discount_percent']) && trim((string)$itm['sale_discount_percent']) !== '';
                     $sale_disc_pct  = $has_sale_disc ? floatval($itm['sale_discount_percent']) : 0;
-                    $sale_price     = floatval($itm['sale_price'] ?? 0);
-                    // Determine the Trade Price to store (selling rate):
-                    // Priority: explicit sale_price > form trade_price > p_cost*(1-sale_disc%) > p_cost
-                    if ($sale_price > 0) {
-                        $tp_rate = $sale_price; // JS-computed sale price (baseTp * (1 - saleDisc%))
-                    } elseif ($sale_disc_pct > 0 && $p_cost > 0) {
-                        $tp_rate    = max(0, $p_cost * (1 - ($sale_disc_pct / 100)));
-                        $sale_price = $tp_rate;
-                    } elseif ($form_tp > 0) {
-                        $tp_rate    = $form_tp;
-                        $sale_price = $form_tp;
-                    } else {
-                        $tp_rate    = $p_cost; // fallback: no discount set, use purchase cost as TP
-                        $sale_price = $p_cost;
+
+                    // Determine official Base Trade Price (TP)
+                    $official_tp = ($p_cost > 0) ? $p_cost : ($form_tp > 0 ? $form_tp : 0);
+                    if ($official_tp <= 0 && $pid > 0) {
+                        $stmt_find_tp = $pdo->prepare("SELECT trade_price FROM products WHERE id = ?");
+                        $stmt_find_tp->execute([$pid]);
+                        $official_tp = floatval($stmt_find_tp->fetchColumn() ?: 0);
                     }
+                    if ($official_tp <= 0) {
+                        $official_tp = $p_cost;
+                    }
+
+                    // Selling price after customer sale discount on TP
+                    $calc_sale_price = ($sale_disc_pct > 0 && $official_tp > 0)
+                        ? round(max(0, $official_tp * (1 - ($sale_disc_pct / 100))), 2)
+                        : $official_tp;
+
                     $disc_pct       = floatval($itm['discount_percent'] ?? 0);
                     
                     // Financial calculation: gross = raw_qty * p_cost, disc_amt = gross * disc_pct / 100
@@ -335,21 +358,23 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         // Insert Item Record
                         $stmt_item->execute([
                             $purchase_id, $pid, $batch_no, $expiry_date,
-                            $raw_qty, $raw_qty, 'Pcs', $raw_bonus, $p_cost, $p_cost,
-                            $sale_price, $disc_pct, $sale_disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
+                            $raw_qty, $raw_qty, 'Pcs', $raw_bonus, $p_cost, $official_tp,
+                            $calc_sale_price, $disc_pct, $sale_disc_pct, $disc_amt, $tax_pct, $tax_amt, $row_total
                         ]);
 
-                        // Update Product Main Stock & Rates: add all_total_stock (purchased + bonus)
-                        // NOTE: products.trade_price is NOT updated here — official TP comes from Add/Edit Product
+                        // Update Product Main Stock, TP, Rates & Sale Discount %:
                         $stmt_stock->execute([
                             $all_total_stock, 
                             $net_unit_cost, 
-                            ($has_sale_disc && $sale_disc_pct > 0) ? 1 : 0, $sale_disc_pct, 
-                            $sale_price, $sale_price, 
+                            $official_tp, $official_tp,
+                            $has_sale_disc ? 1 : 0, $sale_disc_pct, 
+                            $has_sale_disc ? 1 : 0, $sale_disc_pct, 
+                            $has_sale_disc ? 1 : 0, $calc_sale_price, 
+                            $has_sale_disc ? 1 : 0, $calc_sale_price, 
                             $pid
                         ]);
 
-                        // Handle Product Batch: add all_total_stock
+                        // Handle Product Batch:
                         $stmt_chk_batch->execute([$pid, $batch_no]);
                         $existing_batch_id = $stmt_chk_batch->fetchColumn();
 
@@ -358,16 +383,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                                 $all_total_stock, 
                                 $expiry_date, 
                                 $net_unit_cost, 
-                                $tp_rate, $tp_rate, 
-                                $sale_price, $sale_price, 
+                                $official_tp, $official_tp, 
+                                $calc_sale_price, $calc_sale_price, 
                                 $existing_batch_id
                             ]);
                         } else {
                             $stmt_ins_batch->execute([
                                 $pid, $batch_no, $expiry_date,
-                                $net_unit_cost, $tp_rate, $sale_price,
+                                $net_unit_cost, $official_tp, $calc_sale_price,
                                 $all_total_stock, $all_total_stock
                             ]);
+                        }
+
+                        // Synchronize all batches of this product with the new sale discount
+                        if ($has_sale_disc) {
+                            $stmt_sync_batches->execute([$sale_disc_pct, $pid]);
                         }
                     }
                 }
@@ -479,7 +509,8 @@ if ($db_connected && $pdo) {
                 p.id, p.product_code, p.name, p.purchase_price, p.trade_price, p.discount_percent,
                 p.stock_unit, p.packs_per_box, p.tablets_per_pack, p.current_stock,
                 c.name as company_name, cat.name as category_name,
-                u.name as base_unit_name, u.short_name as base_unit_short
+                u.name as base_unit_name, u.short_name as base_unit_short,
+                {$tp_disc_sql}
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id
@@ -624,7 +655,7 @@ if ($db_connected && $pdo) {
         box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15);
     }
     .med-dropdown {
-        min-width: 340px;
+        min-width: 420px;
         width: 100%;
     }
     .search-dropdown-item {
@@ -1185,6 +1216,8 @@ function searchProductsForRow(rowId, query) {
         fetch('add_purchase.php?action=search_product&q=' + encodeURIComponent(query))
             .then(r => r.json())
             .then(data => {
+                const curPid = parseInt(document.getElementById('productId_' + rowId)?.value || 0);
+                if (curPid > 0) return; // Medicine already selected! Do not reopen/re-render dropdown!
                 if (Array.isArray(data)) {
                     renderProductList(rowId, data, query);
                 }
@@ -1212,6 +1245,8 @@ function renderProductList(rowId, items, query) {
         const compHl = p.company_name ? highlightMatch(p.company_name, query) : 'General';
         const codeHl = p.product_code ? highlightMatch(p.product_code, query) : '';
         const tp = parseFloat(p.trade_price || 0);
+        const tpDisc = parseFloat(p.tp_discount || 0);
+        const saleDisc = parseFloat(p.discount_percent || 0);
         const cost = parseFloat(p.purchase_price || 0);
         const stock = parseInt(p.current_stock || 0);
 
@@ -1225,15 +1260,24 @@ function renderProductList(rowId, items, query) {
                         <span class="badge bg-light text-primary border ms-1">${codeHl}</span>
                     </div>
                     <div class="text-end">
-                        <span class="badge bg-success-subtle text-success">
+                        <span class="badge bg-success-subtle text-success font-monospace" style="font-size: 0.78rem;">
                             TP: Rs. ${tp.toFixed(2)}
                         </span>
-                        ${parseFloat(p.discount_percent || 0) > 0 ? `<div class="badge bg-primary-subtle text-primary border border-primary-subtle mt-1" style="font-size: 0.70rem;">Sale Disc: ${parseFloat(p.discount_percent).toFixed(1)}%</div>` : ''}
+                        <div class="d-flex justify-content-end align-items-center mt-1 flex-wrap" style="gap: 4px;">
+                            <span class="badge ${tpDisc > 0 ? 'bg-success text-white' : 'bg-light text-muted border'}" style="font-size: 0.70rem;" title="Supplier TP Discount %">
+                                <i class="fas fa-tag mr-1"></i>TP Disc: ${tpDisc > 0 ? tpDisc.toFixed(1) + '%' : '0%'}
+                            </span>
+                            ${saleDisc > 0 ? `
+                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle" style="font-size: 0.70rem;" title="Customer Sale Discount on TP">
+                                    Sale Disc: ${saleDisc.toFixed(1)}%
+                                </span>
+                            ` : ''}
+                        </div>
                     </div>
                 </div>
                 <div class="small text-muted d-flex justify-content-between align-items-center mt-1">
                     <span><i class="fa-solid fa-industry me-1"></i>${compHl}</span>
-                    <span class="text-secondary">Cost: <strong>Rs. ${cost.toFixed(2)}</strong> | Stock: ${stock}</span>
+                    <span class="text-secondary">Cost: <strong class="text-dark">Rs. ${cost.toFixed(2)}</strong> | Stock: <strong class="${stock > 0 ? 'text-dark' : 'text-danger'}">${stock}</strong></span>
                 </div>
             </div>
         `;
@@ -1256,8 +1300,13 @@ function selectProductItem(rowId, p) {
     document.getElementById('baseCost_' + rowId).value = baseCost.toFixed(2);
     document.getElementById('baseTp_' + rowId).value   = baseTp.toFixed(2);
     document.getElementById('packsPerBox_' + rowId).value = pbox;
-    // NOTE: do NOT seed row Discount % from products.discount_percent (that's the SALE discount on TP)
-    document.getElementById('discPct_' + rowId).value = '0.00';
+    
+    // Auto set TP Discount % from product's recorded TP discount (if available)
+    const defTpDisc = parseFloat(p.tp_discount || 0);
+    const discInput = document.getElementById('discPct_' + rowId);
+    if (discInput) {
+        discInput.value = (defTpDisc > 0) ? defTpDisc.toFixed(2) : '0.00';
+    }
 
     // Auto set rate & TP (only if > 0)
     document.getElementById('cost_' + rowId).value = (baseCost > 0) ? baseCost.toFixed(2) : '';
@@ -1267,12 +1316,31 @@ function selectProductItem(rowId, p) {
     const defSaleDisc = parseFloat(p.discount_percent || 0);
     const saleDiscEl = document.getElementById('saleDiscPct_' + rowId);
     if (saleDiscEl) {
-        saleDiscEl.value = (defSaleDisc > 0) ? defSaleDisc.toFixed(2) : '';
+        saleDiscEl.value = (defSaleDisc > 0) ? defSaleDisc.toFixed(2) : '0.00';
+    }
+
+    // Auto-fill Qty to 1 if empty or 0
+    const qtyInput = document.getElementById('qty_' + rowId);
+    if (qtyInput && (!qtyInput.value || parseFloat(qtyInput.value) <= 0)) {
+        qtyInput.value = '1';
+    }
+
+    // Auto-generate batch no if empty
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    if (batchInput && !batchInput.value.trim()) {
+        batchInput.value = 'B-' + Math.floor(1000 + Math.random() * 9000);
     }
 
     calculateRowTotal(rowId);
     updateRowSalePrice(rowId);
-    document.getElementById('medDropdown_' + rowId).classList.add('d-none');
+
+    clearTimeout(medSearchTimers[rowId]);
+    const dd = document.getElementById('medDropdown_' + rowId);
+    if (dd) {
+        dd.classList.add('d-none');
+        const list = document.getElementById('medResultsList_' + rowId);
+        if (list) list.innerHTML = '';
+    }
     setActiveRow(rowId);
 
     // Show "+ Add Batch" quick button
@@ -1280,17 +1348,9 @@ function selectProductItem(rowId, p) {
     if (metaBox) metaBox.classList.remove('d-none');
 
     // Auto-focus Batch No input so user can type batch number directly
-    const batchInput = document.getElementById('batchNo_' + rowId);
     if (batchInput) {
         batchInput.focus();
         batchInput.select();
-    } else {
-        const qtyInput = document.getElementById('qty_' + rowId);
-        if (qtyInput) {
-            if (!qtyInput.value) qtyInput.value = '1';
-            qtyInput.focus();
-            qtyInput.select();
-        }
     }
 }
 
@@ -1970,7 +2030,15 @@ document.addEventListener('DOMContentLoaded', function() {
             rows.forEach(tr => {
                 const rId = tr.id.replace('row_', '');
                 const pid = parseInt(document.getElementById('productId_' + rId)?.value || 0);
-                const qty = parseFloat(document.getElementById('qty_' + rId)?.value || 0);
+                const qtyInput = document.getElementById('qty_' + rId);
+                let qty = parseFloat(qtyInput?.value || 0);
+                if (pid > 0 && qty <= 0) {
+                    if (qtyInput) {
+                        qtyInput.value = '1';
+                        calculateRowTotal(rId);
+                        qty = 1;
+                    }
+                }
                 if (pid > 0 && qty > 0) {
                     validItemsCount++;
                 }

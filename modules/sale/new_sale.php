@@ -225,6 +225,7 @@ if ($db_connected && $pdo) {
                 p.generic_name, 
                 COALESCE(NULLIF(p.trade_price, 0), (SELECT pi.trade_price FROM purchase_items pi WHERE pi.product_id = p.id AND pi.trade_price > 0 ORDER BY pi.id DESC LIMIT 1), (SELECT pi.purchase_price FROM purchase_items pi WHERE pi.product_id = p.id AND pi.purchase_price > 0 ORDER BY pi.id DESC LIMIT 1), p.purchase_price, p.retail_price, 0) as trade_price,
                 p.retail_price, 
+                COALESCE(NULLIF(p.retail_price, 0), NULLIF(p.trade_price, 0), p.purchase_price, 0) as sale_price,
                 p.purchase_price,
                 p.current_stock, 
                 p.stock_unit, 
@@ -457,13 +458,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     if ($tp <= 0) $tp = floatval($prod_row['purchase_price'] ?? 0);
                 }
 
-                // Discount handling
-                $entered_disc = (isset($discounts[$i]) && trim((string)$discounts[$i]) !== '') ? floatval($discounts[$i]) : null;
-                if ($entered_disc !== null && $entered_disc >= 0) {
-                    $disc = max(0.0, min(100.0, $entered_disc));
-                } else {
-                    $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
-                }
+                // Sale Discount is strictly fixed by product master - no one can edit this field
+                $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
 
                 $gross = $qty * $tp;
                 $net   = $gross - ($gross * ($disc / 100));
@@ -1388,7 +1384,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                             <th style="width: 200px;">Batch No <span class="text-danger">*</span></th>
                             <th style="width: 105px;" class="text-center">Quantity (Pcs) <span class="text-danger">*</span></th>
                             <th style="width: 125px;" class="text-right">Price (Rs.) <span class="text-danger">*</span></th>
-                            <th style="width: 90px;" class="text-center">Discount %</th>
+                            <th style="width: 100px;" class="text-center">Sale Disc %</th>
                             <th style="width: 130px;" class="text-right">Net Total (Rs.)</th>
                             <th style="width: 40px;" class="text-center"></th>
                         </tr>
@@ -1591,7 +1587,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control tp-input text-right font-weight-bold text-primary" placeholder="0.00" onfocus="this.select()" oninput="recalculateAll()" required>
             </td>
             <td>
-                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center" placeholder="0.00" value="" onfocus="this.select()" oninput="recalculateAll()">
+                <input type="number" step="0.01" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control disc-input text-center font-weight-bold bg-light" placeholder="0.00" value="" readonly tabindex="-1" title="Sale discount is fixed by product master">
             </td>
             <td>
                 <input type="text" class="form-control font-weight-bold row-net text-right font-monospace bg-light" id="rowNet_${rowId}" placeholder="0.00" value="" readonly>
@@ -2100,7 +2096,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                         <span><i class="fas fa-industry mr-1"></i>${compHl || 'General'}</span>
                         <span class="text-dark font-weight-bold">
                             Sale Price: Rs. ${salePrice.toFixed(2)}
-                            ${disc > 0 ? `<span class="badge badge-primary ml-1">${disc.toFixed(1)}% Disc</span>` : ''}
+                            ${disc > 0 ? `<span class="badge badge-primary ml-1">Sale Disc: ${disc.toFixed(1)}%</span>` : ''}
                         </span>
                     </div>
                 </div>
@@ -2133,11 +2129,11 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         document.getElementById('stockAvailable_' + rowId).value = stock;
         document.getElementById('baseTp_' + rowId).value = tpRate.toFixed(2);
 
-        // Auto-fill Default Discount % from Purchase (only if > 0)
+        // Auto-fill Default Discount % from Purchase / Product Master
         const defDisc = parseFloat(p.default_discount || p.discount_percent || 0) || 0;
         const discInput = document.getElementById('disc_' + rowId);
         if (discInput) {
-            discInput.value = defDisc > 0 ? defDisc.toFixed(2) : '';
+            discInput.value = defDisc > 0 ? defDisc.toFixed(2) : '0.00';
         }
 
         const clearBtn = document.getElementById('medClearBtn_' + rowId);
@@ -2211,7 +2207,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 pillBadge.className = 'stock-pill badge badge-warning';
                 pillBadge.innerHTML = `<i class="fas fa-exclamation-triangle mr-1"></i>Low Stock: <strong>${stock} Pcs</strong> Available`;
             }
-            subInfo.textContent = (p.company_name ? p.company_name : '') + (defDisc > 0 ? (p.company_name ? ' | ' : '') + 'Purchase Disc: ' + defDisc.toFixed(1) + '%' : '');
+            subInfo.textContent = (p.company_name ? p.company_name : '') + (defDisc > 0 ? (p.company_name ? ' | ' : '') + 'Sale Disc: ' + defDisc.toFixed(1) + '%' : '');
         }
 
         const dd = document.getElementById('medDropdown_' + rowId);

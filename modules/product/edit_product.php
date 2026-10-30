@@ -56,14 +56,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
     $trade_price      = floatval($_POST['trade_price'] ?? 0);
     $purchase_price   = (floatval($prod['purchase_price'] ?? 0) > 0) ? floatval($prod['purchase_price']) : $trade_price;
     $discount_percent = floatval($_POST['discount_percent'] ?? 0);
-    $entered_wholesale = floatval($_POST['wholesale_price'] ?? 0);
-    $calc_sale_price  = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
-    if ($discount_percent > 0) {
-        $wholesale_price = $calc_sale_price;
-    } else {
-        $wholesale_price = $entered_wholesale > 0 ? $entered_wholesale : $trade_price;
+    $b_rates          = $_POST['batch_rate'] ?? [];
+    if (!empty($b_rates) && floatval($b_rates[0]) > 0) {
+        $trade_price = floatval($b_rates[0]);
     }
-    $retail_price     = $wholesale_price;
+    $calc_sale_price  = ($discount_percent > 0) ? round(max(0, $trade_price * (1 - ($discount_percent / 100))), 2) : $trade_price;
+    $wholesale_price  = $calc_sale_price;
+    $retail_price     = $calc_sale_price;
     $reorder_level    = intval($_POST['reorder_level'] ?? 10);
     $status           = in_array($_POST['status'] ?? '', ['Active', 'Inactive']) ? $_POST['status'] : 'Active';
 
@@ -101,7 +100,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                 $b_ids            = $_POST['batch_id'] ?? [];
                 $b_nos            = $_POST['batch_no'] ?? [];
                 $b_expiries       = $_POST['batch_expiry'] ?? [];
-                $b_rates          = $_POST['batch_rate'] ?? [];
                 $b_purchases      = $_POST['batch_purchase_rate'] ?? [];
                 $b_stocks         = $_POST['batch_stock'] ?? [];
 
@@ -141,15 +139,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                         if ($brate <= 0) $brate = $trade_price;
                         if ($bpur <= 0)  $bpur = $brate;
                         $bstatus = ($bqty > 0) ? 'Active' : 'Exhausted';
+                        $b_retail = ($discount_percent > 0) ? round(max(0, $brate * (1 - ($discount_percent / 100))), 2) : $brate;
 
                         if ($bid > 0) {
                             $upd_batch_stmt->execute([
-                                $bno, $bexp, $brate, $brate, $bpur, max(0, $bqty), $bstatus, $bid, $product_id
+                                $bno, $bexp, $brate, $b_retail, $bpur, max(0, $bqty), $bstatus, $bid, $product_id
                             ]);
                             $recalculated_total_stock += max(0, $bqty);
                         } else {
                             $ins_batch_stmt->execute([
-                                $product_id, $bno, $bexp, $bpur, $brate, $brate, max(0, $bqty), max(0, $bqty)
+                                $product_id, $bno, $bexp, $bpur, $brate, $b_retail, max(0, $bqty), max(0, $bqty)
                             ]);
                             $recalculated_total_stock += max(0, $bqty);
                         }
@@ -160,6 +159,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                 if (!empty($b_nos)) {
                     $pdo->prepare("UPDATE products SET current_stock = ? WHERE id = ?")->execute([$recalculated_total_stock, $product_id]);
                 }
+
+                // Synchronize retail_price on all batches for this product according to updated discount_percent
+                $pdo->prepare("UPDATE product_batches SET retail_price = ROUND(trade_price * (1 - ? / 100), 2) WHERE product_id = ? AND trade_price > 0")->execute([$discount_percent, $product_id]);
 
                 $pdo->commit();
                 $message = "Product '{$name}' and its batches updated successfully!";

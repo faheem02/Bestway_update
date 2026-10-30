@@ -291,13 +291,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     if ($tp <= 0) $tp = floatval($prod_row['purchase_price'] ?? 0);
                 }
 
-                if (!isAdmin()) {
-                    $disc = array_key_exists($pid, $old_item_discounts)
-                        ? max(0.0, min(100.0, $old_item_discounts[$pid]))
-                        : max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
-                } else {
-                    $disc = max(0.0, min(100.0, $disc));
-                }
+                // Sale Discount is strictly fixed by product master - no one can edit this field
+                $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
 
                 $gross = $qty * $tp;
                 $net   = $gross - ($gross * ($disc / 100));
@@ -817,7 +812,7 @@ $item_stmt->close();
                             <th style="width: 220px;">Batch No</th>
                             <th style="width: 110px;" class="text-center">Qty (Pcs) <span class="text-danger">*</span></th>
                             <th style="width: 140px;" class="text-right">Price / Rate (Rs) <span class="text-danger">*</span></th>
-                            <th style="width: 100px;" class="text-center">Disc %</th>
+                            <th style="width: 100px;" class="text-center">Sale Disc %</th>
                             <th style="width: 150px;" class="text-right">Net Total (Rs)</th>
                             <th style="width: 50px;" class="text-center">Action</th>
                         </tr>
@@ -995,7 +990,7 @@ $item_stmt->close();
                 <input type="number" step="0.01" min="0" name="unit_price[]" id="tp_${rowId}" class="form-control form-control-sm tp-input text-right font-weight-bold text-primary" placeholder="0.00" onfocus="this.select()" oninput="recalculateAll()" required>
             </td>
             <td>
-                <input type="number" step="0.1" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control form-control-sm disc-input text-center" placeholder="0.00" value="" onfocus="this.select()"<?= isAdmin() ? '' : ' readonly tabindex="-1" title="Discount is fixed by product master"' ?>>
+                <input type="number" step="0.01" min="0" max="100" name="disc_percent[]" id="disc_${rowId}" class="form-control form-control-sm disc-input text-center font-weight-bold bg-light" placeholder="0.00" value="" readonly tabindex="-1" title="Sale discount is fixed by product master">
             </td>
             <td>
                 <input type="text" class="form-control form-control-sm font-weight-bold row-net text-right text-dark bg-light" id="rowNet_${rowId}" placeholder="0.00" value="" readonly>
@@ -1156,6 +1151,7 @@ $item_stmt->close();
         list.innerHTML = items.map((p, idx) => {
             const stock = parseInt(p.current_stock || 0);
             const salePrice = parseFloat(p.retail_price || p.trade_price || p.purchase_price || 0);
+            const disc = parseFloat(p.discount_percent || 0);
 
             let stockBadge = stock > 0 ? `<span class="badge badge-success">Stock: ${stock}</span>` : `<span class="badge badge-danger">Out of Stock (0)</span>`;
 
@@ -1167,7 +1163,10 @@ $item_stmt->close();
                     </div>
                     <div class="small text-muted d-flex justify-content-between mt-1">
                         <span>${p.company_name || 'General'}</span>
-                        <span class="text-primary font-weight-bold">Sale Price: Rs. ${salePrice.toFixed(2)}</span>
+                        <span class="text-primary font-weight-bold">
+                            Sale Price: Rs. ${salePrice.toFixed(2)}
+                            ${disc > 0 ? `<span class="badge badge-primary ml-1">${disc.toFixed(1)}% Disc</span>` : ''}
+                        </span>
                     </div>
                 </div>
             `;
@@ -1197,8 +1196,8 @@ $item_stmt->close();
         // Auto-fill Default Discount % if available
         const defDisc = parseFloat(p.discount_percent || 0) || 0;
         const discInput = document.getElementById('disc_' + rowId);
-        if (discInput && !discInput.value) {
-            discInput.value = defDisc > 0 ? defDisc.toFixed(1) : '';
+        if (discInput) {
+            discInput.value = defDisc > 0 ? defDisc.toFixed(2) : '0.00';
         }
 
         const clearBtn = document.getElementById('medClearBtn_' + rowId);

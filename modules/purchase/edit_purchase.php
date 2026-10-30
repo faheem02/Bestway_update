@@ -137,7 +137,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                 ");
 
                 $stmt_chk_batch = $pdo->prepare("SELECT id FROM product_batches WHERE product_id = ? AND batch_no = ? LIMIT 1");
-                $stmt_upd_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ?, expiry_date = ?, purchase_price = ?, trade_price = ? WHERE id = ?");
+                $stmt_upd_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ?, expiry_date = ?, purchase_price = ?, trade_price = ?, retail_price = ? WHERE id = ?");
                 $stmt_ins_batch = $pdo->prepare("INSERT INTO product_batches (product_id, batch_no, expiry_date, purchase_price, trade_price, retail_price, initial_quantity, current_stock, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Active')");
 
                 $impacted_edit_pids = [];
@@ -187,12 +187,20 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
 
                         $stmt_add_stock->execute([$total_stock, $net_unit_cost, $tp_rate, $pid]);
 
+                        $calc_retail = ($sale_disc_pct > 0) ? round($tp_rate * (1 - $sale_disc_pct / 100), 2) : $tp_rate;
+                        if (isset($itm['sale_discount_percent'])) {
+                            $pdo->prepare("UPDATE products SET discount_percent = ?, max_discount_percent = ?, retail_price = ?, wholesale_price = ? WHERE id = ?")
+                                ->execute([$sale_disc_pct, $sale_disc_pct, $calc_retail, $calc_retail, $pid]);
+                            $pdo->prepare("UPDATE product_batches SET retail_price = ROUND(trade_price * (1 - ? / 100), 2) WHERE product_id = ? AND trade_price > 0")
+                                ->execute([$sale_disc_pct, $pid]);
+                        }
+
                         $stmt_chk_batch->execute([$pid, $batch_no]);
                         $b_id = $stmt_chk_batch->fetchColumn();
                         if ($b_id) {
-                            $stmt_upd_batch->execute([$total_stock, $expiry_date, $net_unit_cost, $tp_rate, $b_id]);
+                            $stmt_upd_batch->execute([$total_stock, $expiry_date, $net_unit_cost, $tp_rate, $calc_retail, $b_id]);
                         } else {
-                            $stmt_ins_batch->execute([$pid, $batch_no, $expiry_date, $net_unit_cost, $tp_rate, $tp_rate, $total_stock, $total_stock]);
+                            $stmt_ins_batch->execute([$pid, $batch_no, $expiry_date, $net_unit_cost, $tp_rate, $calc_retail, $total_stock, $total_stock]);
                         }
                     }
                 }

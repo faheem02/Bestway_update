@@ -140,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
                     'batch_no'       => $b_num,
                     'expiry_date'    => $b_exp,
                     'trade_price'    => $b_rate,
-                    'retail_price'   => $b_rate,
+                    'retail_price'   => ($discount_percent > 0) ? round(max(0, $b_rate * (1 - ($discount_percent / 100))), 2) : $b_rate,
                     'purchase_price' => $b_pur,
                     'stock'          => max(0, $b_qty)
                 ];
@@ -158,7 +158,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_product'])) {
             'batch_no'       => $single_batch,
             'expiry_date'    => $single_exp,
             'trade_price'    => $trade_price,
-            'retail_price'   => $trade_price,
+            'retail_price'   => $retail_price,
             'purchase_price' => $trade_price,
             'stock'          => max(0, $single_stock)
         ];
