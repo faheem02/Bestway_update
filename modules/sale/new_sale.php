@@ -1616,6 +1616,24 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         }
     }
 
+    function openNextProductRow(rowId) {
+        const currentRow = document.getElementById('row_' + rowId);
+        if (!currentRow) return;
+
+        let nextRow = currentRow.nextElementSibling;
+        while (nextRow) {
+            const productId = nextRow.querySelector('.product-id-input');
+            if (productId && !productId.value) {
+                const searchInput = nextRow.querySelector('.med-search-input');
+                if (searchInput) searchInput.focus();
+                return;
+            }
+            nextRow = nextRow.nextElementSibling;
+        }
+
+        addNewRow(true);
+    }
+
     // Update row numbers (1, 2, 3...)
     function updateRowIndices() {
         const rows = itemsBody.querySelectorAll('tr');
@@ -2214,6 +2232,7 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         if (dd) dd.classList.add('d-none');
 
         recalculateAll();
+        openNextProductRow(rowId);
     }
 
     function onBatchSelectChange(rowId) {

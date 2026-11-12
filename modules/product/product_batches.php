@@ -163,23 +163,7 @@ $batches = [];
 if ($db_connected && $pdo) {
     try {
         $b_stmt = $pdo->prepare("
-            SELECT 
-                pb.*,
-                COALESCE(
-                    (SELECT s.name FROM purchase_items pi 
-                     JOIN purchases pu ON pu.id = pi.purchase_id 
-                     JOIN suppliers s ON s.id = pu.supplier_id 
-                     WHERE pi.product_id = pb.product_id AND pi.batch_no = pb.batch_no 
-                     ORDER BY pu.id DESC LIMIT 1),
-                    (SELECT s.name FROM purchase_items pi 
-                     JOIN purchases pu ON pu.id = pi.purchase_id 
-                     JOIN suppliers s ON s.id = pu.supplier_id 
-                     WHERE pi.product_id = pb.product_id 
-                     ORDER BY pu.id DESC LIMIT 1),
-                    (SELECT s.name FROM suppliers s WHERE s.status = 'Active' ORDER BY s.id ASC LIMIT 1),
-                    '—'
-                ) as supplier_name
-            FROM product_batches pb
+            SELECT pb.* FROM product_batches pb
             WHERE pb.product_id = ?
             ORDER BY pb.expiry_date ASC, pb.id ASC
         ");
@@ -484,7 +468,6 @@ require_once __DIR__ . '/../../includes/header.php';
                         <th style="width: 110px;">Product Code</th>
                         <th style="min-width: 120px;">Batch No</th>
                         <th style="width: 90px;" class="text-center">Quantity</th>
-                        <th style="min-width: 150px;">Supplier</th>
                         <th style="min-width: 110px;">Category</th>
                         <th style="min-width: 130px;">Company</th>
                         <th style="min-width: 110px;" class="text-end text-right">Sale Price</th>
@@ -498,7 +481,7 @@ require_once __DIR__ . '/../../includes/header.php';
                 <tbody>
                     <?php if (empty($batches)): ?>
                         <tr>
-                            <td colspan="13" class="text-center py-5 text-muted">
+                            <td colspan="12" class="text-center py-5 text-muted">
                                 <i class="fas fa-layer-group fa-2x text-secondary opacity-50 mb-2 d-block"></i>
                                 <h6 class="fw-bold text-dark">No batch records found</h6>
                                 <p class="small text-muted mb-0">No batches have been assigned to this product yet.</p>
@@ -531,9 +514,6 @@ require_once __DIR__ . '/../../includes/header.php';
                                     <?php else: ?>
                                         <span class="text-dark fw-bold"><?= $qty ?></span>
                                     <?php endif; ?>
-                                </td>
-                                <td>
-                                    <span class="text-dark"><?= htmlspecialchars($b['supplier_name'] ?: '—') ?></span>
                                 </td>
                                 <td>
                                     <span class="text-secondary"><?= htmlspecialchars(!empty($product['category_name']) ? $product['category_name'] : '—') ?></span>

@@ -43,6 +43,27 @@ if (isset($_GET['action']) && $_GET['action'] === 'quick_supplier' && $_SERVER['
     exit;
 }
 
+// AJAX endpoint to fetch all active batches for a single product (used for live batch selection)
+if (isset($_GET['action']) && $_GET['action'] === 'get_product_batches') {
+    header('Content-Type: application/json');
+    $pid = intval($_GET['product_id'] ?? 0);
+    $batches = [];
+    if ($db_connected && $pdo && $pid > 0) {
+        try {
+            $b_stmt = $pdo->prepare("
+                SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
+                FROM product_batches 
+                WHERE product_id = ? AND status = 'Active' 
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
+            ");
+            $b_stmt->execute([$pid]);
+            $batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {}
+    }
+    echo json_encode(['success' => true, 'batches' => $batches]);
+    exit;
+}
+
 // Live Search Supplier AJAX Endpoint
 if (isset($_GET['action']) && $_GET['action'] === 'search_supplier') {
     header('Content-Type: application/json');
@@ -270,7 +291,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                 // Check or insert batch
                 $stmt_chk_batch = $pdo->prepare("
                     SELECT id FROM product_batches 
-                    WHERE product_id = ? AND batch_no = ? 
+                    WHERE product_id = ? AND UPPER(TRIM(batch_no)) = UPPER(TRIM(?)) 
                     LIMIT 1
                 ");
                 $stmt_upd_batch = $pdo->prepare("
@@ -299,7 +320,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
 
                 foreach ($items as $itm) {
                     $pid         = intval($itm['product_id'] ?? 0);
-                    $batch_no    = trim($itm['batch_no'] ?? '');
+                    $batch_no    = strtoupper(trim($itm['batch_no'] ?? ''));
                     if ($batch_no === '') {
                         $batch_no = 'DEFAULT';
                     }
@@ -516,7 +537,25 @@ if ($db_connected && $pdo) {
             LEFT JOIN categories cat ON p.category_id = cat.id
             LEFT JOIN units u ON p.unit_id = u.id
             ORDER BY p.name ASC
-        ")->fetchAll();
+        ")->fetchAll(PDO::FETCH_ASSOC);
+
+        // Preload active batches for each product
+        try {
+            $all_batches = $pdo->query("
+                SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
+                FROM product_batches 
+                WHERE status = 'Active' 
+                ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
+            ")->fetchAll(PDO::FETCH_ASSOC);
+            $batch_map = [];
+            foreach ($all_batches as $b) {
+                $batch_map[$b['product_id']][] = $b;
+            }
+            foreach ($products as &$pr) {
+                $pr['batches'] = $batch_map[$pr['id']] ?? [];
+            }
+            unset($pr);
+        } catch (Exception $e) {}
 
         $bank_accounts = $pdo->query("
             SELECT id, bank_name, account_title, account_number, current_balance 
@@ -787,7 +826,7 @@ if ($db_connected && $pdo) {
                     <thead>
                         <tr>
                             <th style="min-width: 220px;">Medicine / Product Name</th>
-                            <th style="width: 120px;" class="text-center">Batch #</th>
+                            <th style="min-width: 175px; width: 185px;" class="text-center">Batch #</th>
                             <th style="width: 130px;" class="text-center">Expiry Date</th>
                             <th style="width: 75px;" class="text-center">Qty</th>
                             <th style="width: 70px;" class="text-center">Bonus</th>
@@ -1028,15 +1067,16 @@ function highlightMatch(text, query) {
 // ----------------------------------------------------
 let supplierSearchTimer = null;
 let currentSupplierIdx = -1;
+let latestSupplierResults = [];
 
 function onSupplierSearchFocus() {
     const input = document.getElementById('supplierSearchInput');
-    searchSuppliers(input.value.trim());
+    searchSuppliers(input ? input.value.trim() : '');
 }
 
 function onSupplierSearchInput() {
     const input = document.getElementById('supplierSearchInput');
-    const q = input.value.trim();
+    const q = input ? input.value.trim() : '';
     if (!q) {
         document.getElementById('supplierSelect').value = '';
         document.getElementById('supplierClearBtn').classList.add('d-none');
@@ -1047,28 +1087,34 @@ function onSupplierSearchInput() {
 
 function searchSuppliers(query) {
     const dd = document.getElementById('supplierDropdown');
+    if (!dd) return;
     currentSupplierIdx = -1;
 
-    // A. Local instant filter
-    const qLower = query.toLowerCase();
-    const localMatches = suppliersCatalog.filter(s => {
-        if (!query) return true;
-        return (s.name && s.name.toLowerCase().includes(qLower)) ||
-               (s.company_name && s.company_name.toLowerCase().includes(qLower)) ||
-               (s.phone && s.phone.includes(qLower));
-    }).slice(0, 20);
+    const qTrim = (query || '').trim();
+    const qLower = qTrim.toLowerCase();
 
-    renderSupplierList(localMatches, query);
+    // Instant local filter from catalog
+    const localMatches = (suppliersCatalog || []).filter(s => {
+        if (!qTrim) return true;
+        const name = (s.name || '').toLowerCase();
+        const comp = (s.company_name || '').toLowerCase();
+        const phone = (s.phone || '');
+        return name.includes(qLower) || comp.includes(qLower) || phone.includes(qLower);
+    }).slice(0, 25);
+
+    latestSupplierResults = localMatches;
+    renderSupplierList(localMatches, qTrim);
     dd.classList.remove('d-none');
 
-    // B. Live AJAX search to Database
+    // Live AJAX search to Database
     clearTimeout(supplierSearchTimer);
     supplierSearchTimer = setTimeout(() => {
-        fetch('add_purchase.php?action=search_supplier&q=' + encodeURIComponent(query))
+        fetch('add_purchase.php?action=search_supplier&q=' + encodeURIComponent(qTrim))
             .then(r => r.json())
             .then(data => {
-                if (Array.isArray(data)) {
-                    renderSupplierList(data, query);
+                if (Array.isArray(data) && data.length > 0) {
+                    latestSupplierResults = data;
+                    renderSupplierList(data, qTrim);
                 }
             })
             .catch(() => {});
@@ -1077,10 +1123,12 @@ function searchSuppliers(query) {
 
 function renderSupplierList(items, query) {
     const list = document.getElementById('supplierResultsList');
+    if (!list) return;
+
     if (!items || items.length === 0) {
         list.innerHTML = `
             <div class="p-3 text-center text-muted small">
-                <i class="fa-solid fa-exclamation-circle me-1 text-warning"></i>
+                <i class="fas fa-exclamation-circle mr-1 text-warning"></i>
                 No suppliers found matching "<strong>${escapeHtml(query)}</strong>"
             </div>
         `;
@@ -1096,20 +1144,28 @@ function renderSupplierList(items, query) {
         return `
             <div class="search-dropdown-item supplier-item" 
                  data-idx="${idx}"
-                 onclick='selectSupplierItem(${JSON.stringify(s).replace(/'/g, "&apos;")})'>
+                 onclick="selectSupplierById(${s.id})">
                 <div class="d-flex justify-content-between align-items-center">
                     <strong class="text-dark">${nameHl}</strong>
-                    <span class="badge ${bal > 0 ? 'bg-danger-subtle text-danger' : 'bg-secondary-subtle text-secondary'}">
+                    <span class="badge ${bal > 0 ? 'badge-danger' : 'badge-secondary'}">
                         Payable: Rs. ${bal.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                     </span>
                 </div>
-                <div class="small text-muted d-flex gap-3 mt-1">
-                    ${compHl ? `<span><i class="fa-solid fa-industry me-1"></i>${compHl}</span>` : ''}
-                    ${phoneHl ? `<span><i class="fa-solid fa-phone me-1"></i>${phoneHl}</span>` : ''}
+                <div class="small text-muted d-flex justify-content-start align-items-center mt-1">
+                    ${compHl ? `<span class="mr-3"><i class="fas fa-industry mr-1 text-muted"></i>${compHl}</span>` : ''}
+                    ${phoneHl ? `<span><i class="fas fa-phone mr-1 text-muted"></i>${phoneHl}</span>` : ''}
                 </div>
             </div>
         `;
     }).join('');
+}
+
+function selectSupplierById(id) {
+    const s = (latestSupplierResults && latestSupplierResults.find(x => x.id == id)) ||
+              (suppliersCatalog && suppliersCatalog.find(x => x.id == id));
+    if (s) {
+        selectSupplierItem(s);
+    }
 }
 
 function selectSupplierItem(s) {
@@ -1144,8 +1200,8 @@ function clearSupplierSelection() {
 
 function onSupplierSearchKeydown(e) {
     const dd = document.getElementById('supplierDropdown');
-    const items = dd.querySelectorAll('.supplier-item');
-    if (dd.classList.contains('d-none') || items.length === 0) {
+    const items = dd ? dd.querySelectorAll('.supplier-item') : [];
+    if (!dd || dd.classList.contains('d-none') || items.length === 0) {
         if (e.key === 'ArrowDown') {
             onSupplierSearchFocus();
         }
@@ -1155,11 +1211,11 @@ function onSupplierSearchKeydown(e) {
     if (e.key === 'ArrowDown') {
         e.preventDefault();
         currentSupplierIdx = Math.min(currentSupplierIdx + 1, items.length - 1);
-        highlightActiveItem(items, currentSupplierIdx);
+        highlightSupplierItem(items);
     } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         currentSupplierIdx = Math.max(currentSupplierIdx - 1, 0);
-        highlightActiveItem(items, currentSupplierIdx);
+        highlightSupplierItem(items);
     } else if (e.key === 'Enter') {
         e.preventDefault();
         if (currentSupplierIdx >= 0 && items[currentSupplierIdx]) {
@@ -1170,56 +1226,66 @@ function onSupplierSearchKeydown(e) {
     }
 }
 
+function highlightSupplierItem(items) {
+    items.forEach((it, idx) => {
+        if (idx === currentSupplierIdx) {
+            it.classList.add('active');
+            it.scrollIntoView({ block: 'nearest' });
+        } else {
+            it.classList.remove('active');
+        }
+    });
+}
+
 // ----------------------------------------------------
-// 2. MEDICINE & BRAND LIVE SEARCH FUNCTIONALITY
+// 2. MEDICINE LIVE SEARCH FUNCTIONALITY
 // ----------------------------------------------------
-const medSearchTimers = {};
-const currentMedIdxs = {};
+let medSearchTimers = {};
+let currentMedIndices = {};
+let latestProductResults = {};
 
 function onMedSearchFocus(rowId) {
     const input = document.getElementById('medSearch_' + rowId);
-    searchProductsForRow(rowId, input.value.trim());
+    searchProducts(rowId, input ? input.value.trim() : '');
 }
 
 function onMedSearchInput(rowId) {
     const input = document.getElementById('medSearch_' + rowId);
-    const q = input.value.trim();
+    const q = input ? input.value.trim() : '';
     if (!q) {
-        document.getElementById('productId_' + rowId).value = '';
-        document.getElementById('medClearBtn_' + rowId).classList.add('d-none');
-        document.getElementById('formulaBadge_' + rowId).classList.add('d-none');
+        clearMedSelection(rowId);
     }
-    searchProductsForRow(rowId, q);
+    searchProducts(rowId, q);
 }
 
-function searchProductsForRow(rowId, query) {
+function searchProducts(rowId, query) {
     const dd = document.getElementById('medDropdown_' + rowId);
     if (!dd) return;
-    currentMedIdxs[rowId] = -1;
+    currentMedIndices[rowId] = -1;
 
-    // A. Local instant filter
-    const qLower = query.toLowerCase();
-    const localMatches = productsCatalog.filter(p => {
-        if (!query) return true;
-        return (p.name && p.name.toLowerCase().includes(qLower)) ||
-               (p.product_code && p.product_code.toLowerCase().includes(qLower)) ||
-               (p.company_name && p.company_name.toLowerCase().includes(qLower)) ||
-               (p.category_name && p.category_name.toLowerCase().includes(qLower));
+    const qTrim = (query || '').trim();
+    const qLower = qTrim.toLowerCase();
+
+    // Instant local filter from catalog
+    const localMatches = (productsCatalog || []).filter(p => {
+        if (!qTrim) return true;
+        const name = (p.name || '').toLowerCase();
+        const comp = (p.company_name || '').toLowerCase();
+        const code = (p.product_code || '').toLowerCase();
+        return name.includes(qLower) || comp.includes(qLower) || code.includes(qLower);
     }).slice(0, 25);
 
-    renderProductList(rowId, localMatches, query);
+    renderProductList(rowId, localMatches, qTrim);
     dd.classList.remove('d-none');
 
-    // B. Live AJAX search to Database
+    // Live AJAX search to Database
     clearTimeout(medSearchTimers[rowId]);
     medSearchTimers[rowId] = setTimeout(() => {
-        fetch('add_purchase.php?action=search_product&q=' + encodeURIComponent(query))
+        fetch('add_purchase.php?action=search_med&q=' + encodeURIComponent(qTrim))
             .then(r => r.json())
             .then(data => {
-                const curPid = parseInt(document.getElementById('productId_' + rowId)?.value || 0);
-                if (curPid > 0) return; // Medicine already selected! Do not reopen/re-render dropdown!
-                if (Array.isArray(data)) {
-                    renderProductList(rowId, data, query);
+                if (Array.isArray(data) && data.length > 0) {
+                    renderProductList(rowId, data, qTrim);
                 }
             })
             .catch(() => {});
@@ -1233,12 +1299,14 @@ function renderProductList(rowId, items, query) {
     if (!items || items.length === 0) {
         list.innerHTML = `
             <div class="p-3 text-center text-muted small">
-                <i class="fa-solid fa-pills me-1 text-warning"></i>
-                No medicine or brand found matching "<strong>${escapeHtml(query)}</strong>"
+                <i class="fas fa-exclamation-circle mr-1 text-warning"></i>
+                No medicines found matching "<strong>${escapeHtml(query)}</strong>"
             </div>
         `;
         return;
     }
+
+    latestProductResults[rowId] = items;
 
     list.innerHTML = items.map((p, idx) => {
         const nameHl = highlightMatch(p.name, query);
@@ -1249,26 +1317,28 @@ function renderProductList(rowId, items, query) {
         const saleDisc = parseFloat(p.discount_percent || 0);
         const cost = parseFloat(p.purchase_price || 0);
         const stock = parseInt(p.current_stock || 0);
+        const bCount = (p.batches && Array.isArray(p.batches)) ? p.batches.length : 0;
 
         return `
             <div class="search-dropdown-item med-item-${rowId}" 
                  data-idx="${idx}"
-                 onclick='selectProductItem(${rowId}, ${JSON.stringify(p).replace(/'/g, "&apos;")})'>
+                 onclick="selectProductById(${rowId}, ${p.id})">
                 <div class="d-flex justify-content-between align-items-start">
                     <div>
                         <strong class="text-dark">${nameHl}</strong>
-                        <span class="badge bg-light text-primary border ms-1">${codeHl}</span>
+                        <span class="badge badge-light border text-primary ml-1">${codeHl}</span>
+                        ${bCount > 0 ? `<span class="badge badge-info ml-1" style="font-size:0.68rem;">${bCount} ${bCount === 1 ? 'Batch' : 'Batches'}</span>` : ''}
                     </div>
-                    <div class="text-end">
-                        <span class="badge bg-success-subtle text-success font-monospace" style="font-size: 0.78rem;">
+                    <div class="text-right">
+                        <span class="badge badge-light text-success font-monospace" style="font-size: 0.78rem;">
                             TP: Rs. ${tp.toFixed(2)}
                         </span>
                         <div class="d-flex justify-content-end align-items-center mt-1 flex-wrap" style="gap: 4px;">
-                            <span class="badge ${tpDisc > 0 ? 'bg-success text-white' : 'bg-light text-muted border'}" style="font-size: 0.70rem;" title="Supplier TP Discount %">
+                            <span class="badge ${tpDisc > 0 ? 'badge-success' : 'badge-light text-muted border'}" style="font-size: 0.70rem;" title="Supplier TP Discount %">
                                 <i class="fas fa-tag mr-1"></i>TP Disc: ${tpDisc > 0 ? tpDisc.toFixed(1) + '%' : '0%'}
                             </span>
                             ${saleDisc > 0 ? `
-                                <span class="badge bg-primary-subtle text-primary border border-primary-subtle" style="font-size: 0.70rem;" title="Customer Sale Discount on TP">
+                                <span class="badge badge-light text-primary border" style="font-size: 0.70rem;" title="Customer Sale Discount on TP">
                                     Sale Disc: ${saleDisc.toFixed(1)}%
                                 </span>
                             ` : ''}
@@ -1276,12 +1346,20 @@ function renderProductList(rowId, items, query) {
                     </div>
                 </div>
                 <div class="small text-muted d-flex justify-content-between align-items-center mt-1">
-                    <span><i class="fa-solid fa-industry me-1"></i>${compHl}</span>
+                    <span><i class="fas fa-industry mr-1 text-muted"></i>${compHl}</span>
                     <span class="text-secondary">Cost: <strong class="text-dark">Rs. ${cost.toFixed(2)}</strong> | Stock: <strong class="${stock > 0 ? 'text-dark' : 'text-danger'}">${stock}</strong></span>
                 </div>
             </div>
         `;
     }).join('');
+}
+
+function selectProductById(rowId, pid) {
+    const list = latestProductResults[rowId] || productsCatalog;
+    const p = list ? list.find(x => x.id == pid) : null;
+    if (p) {
+        selectProductItem(rowId, p);
+    }
 }
 
 function selectProductItem(rowId, p) {
@@ -1292,11 +1370,9 @@ function selectProductItem(rowId, p) {
 
     const rawCost  = parseFloat(p.purchase_price || 0);
     const baseTp   = parseFloat(p.trade_price || 0);
-    // Auto-fulfill rate: use trade_price (official TP from Add/Edit Product) first so TP rate shows as given on Add Product
     const baseCost = (baseTp > 0) ? baseTp : (rawCost > 0 ? rawCost : 0);
     const pbox     = parseInt(p.packs_per_box || 1);
 
-    // Store base reference rates & packaging conversion
     document.getElementById('baseCost_' + rowId).value = baseCost.toFixed(2);
     document.getElementById('baseTp_' + rowId).value   = baseTp.toFixed(2);
     document.getElementById('packsPerBox_' + rowId).value = pbox;
@@ -1325,10 +1401,11 @@ function selectProductItem(rowId, p) {
         qtyInput.value = '1';
     }
 
-    // Auto-generate batch no if empty
-    const batchInput = document.getElementById('batchNo_' + rowId);
-    if (batchInput && !batchInput.value.trim()) {
-        batchInput.value = 'B-' + Math.floor(1000 + Math.random() * 9000);
+    // Populate Batch selection & details
+    if (p.batches && Array.isArray(p.batches) && p.batches.length > 0) {
+        populateProductBatchOptions(rowId, p.batches);
+    } else {
+        fetchBatchOptions(rowId, p.id);
     }
 
     calculateRowTotal(rowId);
@@ -1347,10 +1424,180 @@ function selectProductItem(rowId, p) {
     const metaBox = document.getElementById('productMetaBox_' + rowId);
     if (metaBox) metaBox.classList.remove('d-none');
 
-    // Auto-focus Batch No input so user can type batch number directly
+    // Auto-focus Batch No input so user can type batch number directly or select
+    const batchInput = document.getElementById('batchNo_' + rowId);
     if (batchInput) {
         batchInput.focus();
         batchInput.select();
+    }
+}
+
+// ----------------------------------------------------
+// BATCH MANAGEMENT & SELECTION FUNCTIONS
+// ----------------------------------------------------
+const rowBatchesMap = {};
+
+function populateProductBatchOptions(rowId, batches) {
+    rowBatchesMap[rowId] = Array.isArray(batches) ? batches : [];
+    const menu = document.getElementById('batchMenu_' + rowId);
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    const metaDisp = document.getElementById('batchMetaDisp_' + rowId);
+    if (!menu) return;
+
+    if (!batches || batches.length === 0) {
+        menu.innerHTML = `
+            <div class="px-3 py-2 text-muted small border-bottom bg-light">
+                <i class="fas fa-boxes mr-1"></i>No existing batches
+            </div>
+            <a class="dropdown-item py-2 text-primary font-weight-bold" href="javascript:void(0)" onclick="createNewBatchPrompt(${rowId})">
+                <i class="fas fa-plus-circle mr-1"></i>+ Enter New Batch
+            </a>
+        `;
+        if (metaDisp) metaDisp.innerHTML = '<span class="badge badge-light border text-muted">New Batch</span>';
+        if (batchInput && !batchInput.value.trim()) {
+            batchInput.value = '';
+            batchInput.placeholder = 'TYPE NEW BATCH #';
+            batchInput.focus();
+        }
+        return;
+    }
+
+    let itemsHtml = `
+        <div class="px-3 py-2 text-muted small border-bottom bg-light d-flex justify-content-between align-items-center">
+            <span><i class="fas fa-layer-group mr-1 text-primary"></i><strong>${batches.length}</strong> ${batches.length === 1 ? 'Batch' : 'Batches'} Available</span>
+            <span class="badge badge-info" style="font-size:0.68rem;">Select or Type</span>
+        </div>
+        <a class="dropdown-item py-2 text-success font-weight-bold border-bottom" href="javascript:void(0)" onclick="createNewBatchPrompt(${rowId})">
+            <i class="fas fa-plus-circle mr-1"></i>+ Add New Batch
+        </a>
+    `;
+
+    batches.forEach(b => {
+        const bNo = b.batch_no || 'DEFAULT';
+        const exp = b.expiry_date ? b.expiry_date : 'No Expiry';
+        const stk = parseInt(b.current_stock || 0);
+        itemsHtml += `
+            <a class="dropdown-item py-2 border-bottom" href="javascript:void(0)" onclick="applyBatchSelectionById(${rowId}, ${b.id})">
+                <div class="d-flex justify-content-between align-items-center">
+                    <strong class="font-monospace text-dark">${escapeHtml(bNo)}</strong>
+                    <span class="badge ${stk > 0 ? 'badge-success' : 'badge-secondary'}" style="font-size:0.70rem;">Stock: ${stk}</span>
+                </div>
+                <div class="small text-muted d-flex justify-content-between mt-1">
+                    <span>Exp: ${exp}</span>
+                    <span>TP: Rs. ${parseFloat(b.trade_price || 0).toFixed(2)}</span>
+                </div>
+            </a>
+        `;
+    });
+
+    menu.innerHTML = itemsHtml;
+
+    // Auto-select the first / latest batch if batchInput is empty
+    if (batchInput && !batchInput.value.trim() && batches.length > 0) {
+        applyBatchSelection(rowId, batches[0]);
+    }
+}
+
+function fetchBatchOptions(rowId, productId) {
+    if (!productId) return;
+    const menu = document.getElementById('batchMenu_' + rowId);
+    if (menu) {
+        menu.innerHTML = `
+            <div class="p-3 text-center text-muted small">
+                <span class="spinner-border spinner-border-sm mr-1 text-primary"></span> Loading batches...
+            </div>
+        `;
+    }
+
+    fetch('add_purchase.php?action=get_product_batches&product_id=' + encodeURIComponent(productId))
+        .then(r => r.json())
+        .then(data => {
+            const batches = (data && data.success && Array.isArray(data.batches)) ? data.batches : [];
+            populateProductBatchOptions(rowId, batches);
+        })
+        .catch(() => {
+            populateProductBatchOptions(rowId, []);
+        });
+}
+
+function applyBatchSelectionById(rowId, batchId) {
+    const batches = rowBatchesMap[rowId] || [];
+    const b = batches.find(x => x.id == batchId);
+    if (b) {
+        applyBatchSelection(rowId, b);
+    }
+}
+
+function applyBatchSelection(rowId, batch) {
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    const expInput = document.getElementById('expiry_' + rowId);
+    const costInput = document.getElementById('cost_' + rowId);
+    const tpInput = document.getElementById('tp_' + rowId);
+    const metaDisp = document.getElementById('batchMetaDisp_' + rowId);
+
+    if (batchInput && batch) {
+        batchInput.value = (batch.batch_no || '').toUpperCase();
+    }
+    if (expInput && batch && batch.expiry_date && batch.expiry_date !== '0000-00-00') {
+        expInput.value = batch.expiry_date;
+    }
+    if (batch) {
+        const bCost = parseFloat(batch.purchase_price || 0);
+        const bTp = parseFloat(batch.trade_price || 0);
+        if (bTp > 0 && tpInput) tpInput.value = bTp.toFixed(2);
+        if (bCost > 0 && costInput && (!costInput.value || parseFloat(costInput.value) <= 0)) {
+            costInput.value = bCost.toFixed(2);
+        }
+    }
+    if (metaDisp && batch) {
+        const stk = parseInt(batch.current_stock || 0);
+        metaDisp.innerHTML = `<span class="badge badge-light border text-primary">Existing (Stock: ${stk})</span>`;
+    }
+
+    calculateRowTotal(rowId);
+    updateRowSalePrice(rowId);
+}
+
+function createNewBatchPrompt(rowId) {
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    const expInput = document.getElementById('expiry_' + rowId);
+    const metaDisp = document.getElementById('batchMetaDisp_' + rowId);
+    if (batchInput) {
+        batchInput.value = '';
+        batchInput.placeholder = 'TYPE NEW BATCH #';
+        batchInput.focus();
+    }
+    if (expInput) {
+        const d = new Date();
+        d.setFullYear(d.getFullYear() + 2);
+        expInput.value = d.toISOString().split('T')[0];
+    }
+    if (metaDisp) {
+        metaDisp.innerHTML = '<span class="badge badge-success text-white">+ New Batch (Type Above)</span>';
+    }
+}
+
+function onBatchManualInput(rowId) {
+    const batchInput = document.getElementById('batchNo_' + rowId);
+    const metaDisp = document.getElementById('batchMetaDisp_' + rowId);
+    if (!batchInput) return;
+    const val = batchInput.value.trim().toUpperCase();
+    batchInput.value = val;
+
+    const batches = rowBatchesMap[rowId] || [];
+    const matched = batches.find(b => (b.batch_no || '').toUpperCase() === val);
+    if (matched) {
+        const expInput = document.getElementById('expiry_' + rowId);
+        if (expInput && matched.expiry_date && matched.expiry_date !== '0000-00-00') {
+            expInput.value = matched.expiry_date;
+        }
+        if (metaDisp) {
+            metaDisp.innerHTML = `<span class="badge badge-light border text-primary">Existing (Stock: ${parseInt(matched.current_stock || 0)})</span>`;
+        }
+    } else {
+        if (metaDisp) {
+            metaDisp.innerHTML = val ? '<span class="badge badge-success text-white">+ New Batch</span>' : '';
+        }
     }
 }
 
@@ -1367,6 +1614,13 @@ function clearMedSelection(rowId) {
     if (metaBox) metaBox.classList.add('d-none');
     const batchInput = document.getElementById('batchNo_' + rowId);
     if (batchInput) batchInput.value = '';
+    const metaDisp = document.getElementById('batchMetaDisp_' + rowId);
+    if (metaDisp) metaDisp.innerHTML = '';
+    const bMenu = document.getElementById('batchMenu_' + rowId);
+    if (bMenu) {
+        bMenu.innerHTML = `<div class="p-2 text-muted small text-center"><i class="fas fa-info-circle mr-1"></i>Select medicine first</div>`;
+    }
+    rowBatchesMap[rowId] = [];
     document.getElementById('baseCost_' + rowId).value = '0.00';
     document.getElementById('baseTp_' + rowId).value = '0.00';
     document.getElementById('cost_' + rowId).value = '';
@@ -1378,27 +1632,49 @@ function clearMedSelection(rowId) {
     if (document.getElementById('gstPct_' + rowId)) document.getElementById('gstPct_' + rowId).value = '';
     if (document.getElementById('taxAmt_' + rowId)) document.getElementById('taxAmt_' + rowId).value = '0.00';
     document.getElementById('rowTotal_' + rowId).value = '';
-    if (document.getElementById('rowAllDiscPct_' + rowId)) document.getElementById('rowAllDiscPct_' + rowId).value = '0.00';
-    if (document.getElementById('effectiveCostDisp_' + rowId)) document.getElementById('effectiveCostDisp_' + rowId).textContent = 'Cost: 0.00';
-    if (document.getElementById('saleDiscPct_' + rowId)) document.getElementById('saleDiscPct_' + rowId).value = '';
-    if (document.getElementById('salePriceDisp_' + rowId)) document.getElementById('salePriceDisp_' + rowId).textContent = 'Sale: Rs. 0.00';
-    if (document.getElementById('salePrice_' + rowId)) document.getElementById('salePrice_' + rowId).value = '0.00';
-    const discDisp = document.getElementById('discDisplay_' + rowId);
-    if (discDisp) discDisp.innerHTML = '';
-    const bValDisp = document.getElementById('bonusValDisp_' + rowId);
-    if (bValDisp) bValDisp.innerHTML = '';
-    const dAmtDisp = document.getElementById('discAmtDisp_' + rowId);
-    if (dAmtDisp) dAmtDisp.innerHTML = '';
-    const tAmtDisp = document.getElementById('taxAmtDisp_' + rowId);
-    if (tAmtDisp) tAmtDisp.innerHTML = '';
-    calculateRowTotal(rowId);
-
-    document.getElementById('medSearch_' + rowId).focus();
-    searchProductsForRow(rowId, '');
+    calculateBillTotals();
 }
 
+function onMedSearchKeydown(e, rowId) {
+    const dd = document.getElementById('medDropdown_' + rowId);
+    const items = dd ? dd.querySelectorAll('.med-item-' + rowId) : [];
+    if (!dd || dd.classList.contains('d-none') || items.length === 0) {
+        if (e.key === 'ArrowDown') {
+            onMedSearchFocus(rowId);
+        }
+        return;
+    }
+
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        currentMedIndices[rowId] = Math.min(currentMedIndices[rowId] + 1, items.length - 1);
+        highlightMedItem(items, rowId);
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        currentMedIndices[rowId] = Math.max(currentMedIndices[rowId] - 1, 0);
+        highlightMedItem(items, rowId);
+    } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (currentMedIndices[rowId] >= 0 && items[currentMedIndices[rowId]]) {
+            items[currentMedIndices[rowId]].click();
+        }
+    } else if (e.key === 'Escape') {
+        dd.classList.add('d-none');
+    }
+}
+
+function highlightMedItem(items, rowId) {
+    items.forEach((it, idx) => {
+        if (idx === currentMedIndices[rowId]) {
+            it.classList.add('active');
+            it.scrollIntoView({ block: 'nearest' });
+        } else {
+            it.classList.remove('active');
+        }
+    });
+}
 // ----------------------------------------------------
-// ROW SELECTION & HIGHLIGHT
+// ROW SELECTION & ACTIVE HIGHLIGHT
 // ----------------------------------------------------
 let activeRowId = null;
 
@@ -1494,50 +1770,6 @@ function updateRowSalePrice(rowId) {
     }
 }
 
-function onMedSearchKeydown(e, rowId) {
-    const dd = document.getElementById('medDropdown_' + rowId);
-    if (!dd) return;
-    const items = dd.querySelectorAll('.med-item-' + rowId);
-    if (dd.classList.contains('d-none') || items.length === 0) {
-        if (e.key === 'ArrowDown') {
-            onMedSearchFocus(rowId);
-        }
-        return;
-    }
-
-    let activeIdx = currentMedIdxs[rowId] ?? -1;
-
-    if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        activeIdx = Math.min(activeIdx + 1, items.length - 1);
-        currentMedIdxs[rowId] = activeIdx;
-        highlightActiveItem(items, activeIdx);
-    } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        activeIdx = Math.max(activeIdx - 1, 0);
-        currentMedIdxs[rowId] = activeIdx;
-        highlightActiveItem(items, activeIdx);
-    } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (activeIdx >= 0 && items[activeIdx]) {
-            items[activeIdx].click();
-        }
-    } else if (e.key === 'Escape') {
-        dd.classList.add('d-none');
-    }
-}
-
-function highlightActiveItem(items, activeIdx) {
-    items.forEach((it, idx) => {
-        if (idx === activeIdx) {
-            it.classList.add('active');
-            it.scrollIntoView({ block: 'nearest' });
-        } else {
-            it.classList.remove('active');
-        }
-    });
-}
-
 // ----------------------------------------------------
 // 3. TABLE ROW & BILL CALCULATION LOGIC
 // ----------------------------------------------------
@@ -1618,17 +1850,39 @@ function addNewItemRow(prefilledData = null) {
             <input type="hidden" id="allTotalQty_${rowCounter}" value="0">
         </td>
 
-        <!-- 1.5 Batch # -->
-        <td style="width: 120px;">
-            <input type="text" 
-                   name="items[${rowCounter}][batch_no]" 
-                   id="batchNo_${rowCounter}" 
-                   class="form-control text-center font-monospace font-weight-bold text-uppercase" 
-                   placeholder="BATCH #" 
-                   value="${batchNo}" 
-                   autocomplete="off" 
-                   required
-                   onfocus="this.select()">
+        <!-- 1.5 Batch # (Select + Editable / Typeable) -->
+        <td style="min-width: 175px; width: 185px;">
+            <div class="input-group">
+                <input type="text" 
+                       name="items[${rowCounter}][batch_no]" 
+                       id="batchNo_${rowCounter}" 
+                       class="form-control text-center font-monospace font-weight-bold text-uppercase px-1" 
+                       placeholder="BATCH #" 
+                       value="${batchNo}" 
+                       autocomplete="off" 
+                       required
+                       onfocus="this.select()"
+                       oninput="onBatchManualInput(${rowCounter})">
+                <div class="input-group-append">
+                    <button type="button" 
+                            class="btn btn-outline-secondary px-2" 
+                            id="batchDropdownBtn_${rowCounter}" 
+                            data-toggle="dropdown" 
+                            aria-haspopup="true" 
+                            aria-expanded="false" 
+                            title="Select existing batch or choose + New Batch">
+                        <i class="fas fa-caret-down"></i>
+                    </button>
+                    <div class="dropdown-menu dropdown-menu-right shadow p-0 batch-dropdown-menu" 
+                         id="batchMenu_${rowCounter}" 
+                         style="max-height: 250px; overflow-y: auto; font-size: 0.85rem; min-width: 230px; z-index: 1070;">
+                        <div class="p-2 text-muted small text-center" id="batchMenuEmpty_${rowCounter}">
+                            <i class="fas fa-info-circle mr-1"></i>Select medicine first
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div id="batchMetaDisp_${rowCounter}" class="text-muted text-center mt-1 font-monospace" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 1.6 Expiry Date -->
@@ -1754,6 +2008,15 @@ function addAnotherBatchForProduct(sourceRowId) {
         batch_no: '',
         expiry_date: expDate
     });
+
+    const newRowId = rowCounter;
+    const cachedBatches = rowBatchesMap[sourceRowId] || [];
+    if (cachedBatches.length > 0) {
+        populateProductBatchOptions(newRowId, cachedBatches);
+        createNewBatchPrompt(newRowId);
+    } else {
+        fetchBatchOptions(newRowId, pId);
+    }
 
     const newBatchInput = document.getElementById('batchNo_' + rowCounter);
     if (newBatchInput) {
@@ -2010,11 +2273,11 @@ document.addEventListener('click', function(e) {
     });
 });
 
-// DOM Ready initialization
-document.addEventListener('DOMContentLoaded', function() {
-    // Client-side form submission validation
+// Page initialization & safety checks
+function initPurchasePage() {
     const purchaseForm = document.getElementById('purchaseForm');
-    if (purchaseForm) {
+    if (purchaseForm && !purchaseForm.getAttribute('data-initialized')) {
+        purchaseForm.setAttribute('data-initialized', 'true');
         purchaseForm.addEventListener('submit', function(e) {
             const supId = parseInt(document.getElementById('supplierSelect')?.value || 0);
             if (!supId || supId <= 0) {
@@ -2054,66 +2317,83 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Add first item row automatically
-    addNewItemRow();
+    // Add first item row automatically if table is empty
+    const tbody = document.getElementById('itemsTableBody');
+    const existingRows = tbody ? tbody.querySelectorAll('tr') : [];
+    if (tbody && existingRows.length === 0) {
+        addNewItemRow();
+    }
 
     // Quick Supplier Modal form submit
     const quickSupplierForm = document.getElementById('quickSupplierForm');
     const qsFeedback = document.getElementById('qsFeedback');
 
-    quickSupplierForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        qsFeedback.classList.add('d-none');
+    if (quickSupplierForm && !quickSupplierForm.getAttribute('data-initialized')) {
+        quickSupplierForm.setAttribute('data-initialized', 'true');
+        quickSupplierForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            if (qsFeedback) qsFeedback.classList.add('d-none');
 
-        const name    = document.getElementById('qsName').value.trim();
-        const company = document.getElementById('qsCompany').value.trim();
-        const phone   = document.getElementById('qsPhone').value.trim();
-        const address = document.getElementById('qsAddress').value.trim();
+            const name    = document.getElementById('qsName').value.trim();
+            const company = document.getElementById('qsCompany').value.trim();
+            const phone   = document.getElementById('qsPhone').value.trim();
+            const address = document.getElementById('qsAddress').value.trim();
 
-        if (!name) return;
+            if (!name) return;
 
-        const fd = new FormData();
-        fd.append('supplier_name', name);
-        fd.append('supplier_company', company);
-        fd.append('supplier_phone', phone);
-        fd.append('supplier_address', address);
+            const fd = new FormData();
+            fd.append('supplier_name', name);
+            fd.append('supplier_company', company);
+            fd.append('supplier_phone', phone);
+            fd.append('supplier_address', address);
 
-        fetch('add_purchase.php?action=quick_supplier', {
-            method: 'POST',
-            body: fd
-        })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success) {
-                const newSup = {
-                    id: data.id,
-                    name: data.name,
-                    company_name: data.company_name || company || '',
-                    phone: phone,
-                    current_balance: '0.00'
-                };
-                suppliersCatalog.unshift(newSup);
-                selectSupplierItem(newSup);
-                $('#modalQuickSupplier').modal('hide');
-                quickSupplierForm.reset();
-            } else {
-                qsFeedback.textContent = data.message || 'Could not register supplier.';
-                qsFeedback.classList.remove('d-none');
-            }
-        })
-        .catch(err => {
-            qsFeedback.textContent = 'Network or server error.';
-            qsFeedback.classList.remove('d-none');
+            fetch('add_purchase.php?action=quick_supplier', {
+                method: 'POST',
+                body: fd
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const newSup = {
+                        id: data.id,
+                        name: data.name,
+                        company_name: data.company_name || company || '',
+                        phone: phone,
+                        current_balance: '0.00'
+                    };
+                    suppliersCatalog.unshift(newSup);
+                    selectSupplierItem(newSup);
+                    $('#modalQuickSupplier').modal('hide');
+                    quickSupplierForm.reset();
+                } else {
+                    if (qsFeedback) {
+                        qsFeedback.textContent = data.message || 'Could not register supplier.';
+                        qsFeedback.classList.remove('d-none');
+                    }
+                }
+            })
+            .catch(err => {
+                if (qsFeedback) {
+                    qsFeedback.textContent = 'Network or server error.';
+                    qsFeedback.classList.remove('d-none');
+                }
+            });
         });
-    });
+    }
 
     // Auto-select text on focus so user can immediately overwrite values without backspacing
     document.addEventListener('focus', function(e) {
-        if (e.target && (e.target.matches('input[type=number]') || e.target.matches('.med-search-input'))) {
+        if (e.target && (e.target.matches('input[type=number]') || e.target.matches('.med-search-input') || (e.target.id && e.target.id.startsWith('batchNo_')))) {
             e.target.select();
         }
     }, true);
-});
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPurchasePage);
+} else {
+    initPurchasePage();
+}
 </script>
 
 <?php require_once __DIR__ . '/../../includes/footer.php';
