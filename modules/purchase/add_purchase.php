@@ -53,7 +53,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_product_batches') {
             $b_stmt = $pdo->prepare("
                 SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
                 FROM product_batches 
-                WHERE product_id = ? AND status = 'Active' 
+                WHERE product_id = ? AND status = 'Active' AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
             ");
             $b_stmt->execute([$pid]);
@@ -79,7 +79,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_supplier') {
                 $stmt = $pdo->prepare("
                     SELECT id, name, company_name, phone, current_balance 
                     FROM suppliers 
-                    WHERE status = 'Active' 
+                    WHERE status = 'Active'
                       AND (name LIKE :q1 OR company_name LIKE :q2 OR phone LIKE :q3)
                     ORDER BY 
                       CASE 
@@ -513,7 +513,7 @@ if ($db_connected && $pdo) {
         $suppliers = $pdo->query("
             SELECT id, name, company_name, current_balance, phone 
             FROM suppliers 
-            WHERE status = 'Active' 
+            WHERE status = 'Active'
             ORDER BY name ASC
         ")->fetchAll();
 
@@ -544,7 +544,7 @@ if ($db_connected && $pdo) {
             $all_batches = $pdo->query("
                 SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
                 FROM product_batches 
-                WHERE status = 'Active' 
+                WHERE status = 'Active' AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
             ")->fetchAll(PDO::FETCH_ASSOC);
             $batch_map = [];
@@ -560,7 +560,7 @@ if ($db_connected && $pdo) {
         $bank_accounts = $pdo->query("
             SELECT id, bank_name, account_title, account_number, current_balance 
             FROM bank_accounts 
-            WHERE status = 'Active' 
+            WHERE status = 'Active'
             ORDER BY bank_name ASC
         ")->fetchAll();
 

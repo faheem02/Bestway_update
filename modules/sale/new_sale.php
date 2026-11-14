@@ -37,7 +37,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'search_product') {
             $b_stmt = $pdo->prepare("
                 SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
                 FROM product_batches 
-                WHERE product_id IN ($in_clause) AND status = 'Active' 
+                WHERE product_id IN ($in_clause) AND status = 'Active' AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
             ");
             $b_stmt->execute($pids);
@@ -65,7 +65,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_product_batches') {
             $b_stmt = $pdo->prepare("
                 SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
                 FROM product_batches 
-                WHERE product_id = ? AND status = 'Active' 
+                WHERE product_id = ? AND status = 'Active' AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
             ");
             $b_stmt->execute([$pid]);
@@ -247,7 +247,7 @@ if ($db_connected && $pdo) {
             $b_stmt = $pdo->query("
                 SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock 
                 FROM product_batches 
-                WHERE status = 'Active' 
+                WHERE status = 'Active' AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC
             ");
             $b_map = [];
@@ -693,7 +693,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             ");
             $initial_products = $stmt_init_p->fetchAll(PDO::FETCH_ASSOC);
             if (!empty($initial_products)) {
-                $b_stmt = $pdo->query("SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock FROM product_batches WHERE status = 'Active' ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC");
+                $b_stmt = $pdo->query("SELECT id, product_id, batch_no, expiry_date, trade_price, retail_price, purchase_price, current_stock FROM product_batches WHERE status = 'Active' AND current_stock > 0 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id ASC");
                 $b_map = [];
                 while ($b = $b_stmt->fetch(PDO::FETCH_ASSOC)) {
                     $b_map[$b['product_id']][] = $b;
