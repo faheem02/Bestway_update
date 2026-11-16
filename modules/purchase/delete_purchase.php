@@ -30,20 +30,27 @@ if ($db_connected && $pdo && $id > 0) {
                 $stmt_revert_batch->execute([$tot_qty, $it['product_id'], $it['batch_no']]);
             }
 
-            // 2. Revert Supplier Balance
             $sup_id = intval($pur['supplier_id']);
-            $balance_impact = floatval($pur['balance_amount']);
-            if ($balance_impact > 0 && $sup_id > 0) {
-                $pdo->prepare("UPDATE suppliers SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$balance_impact, $sup_id]);
+
+            // 2. Undo the money paid against this bill in the cash book / bank book
+            //    (payment at purchase time is booked as 'purchase', later payments as 'supplier_payment')
+            require_once __DIR__ . '/../../includes/functions.php';
+            $pay_ids = $pdo->prepare("SELECT id FROM supplier_payments WHERE purchase_id = ?");
+            $pay_ids->execute([$id]);
+            $refs = [['purchase', $id]];
+            foreach ($pay_ids->fetchAll(PDO::FETCH_COLUMN) as $spid) { $refs[] = ['supplier_payment', (int)$spid]; }
+            foreach ($refs as $rf) {
+                reverseBookEntries($pdo, $rf[0], $rf[1]); // removes cash_book / bank_transactions rows for this reference
             }
 
-            // 3. Delete from ledgers & payments
-            $pdo->prepare("DELETE FROM supplier_ledgers WHERE reference_no = ? AND supplier_id = ?")->execute([$pur['bill_no'], $sup_id]);
+            // 3. Delete payments, items and purchase
             $pdo->prepare("DELETE FROM supplier_payments WHERE purchase_id = ?")->execute([$id]);
-
-            // 4. Delete items and purchase
             $pdo->prepare("DELETE FROM purchase_items WHERE purchase_id = ?")->execute([$id]);
             $pdo->prepare("DELETE FROM purchases WHERE id = ?")->execute([$id]);
+
+            // 4. Rebuild supplier ledger & balance from what remains (the old manual
+            //    "balance - balance_amount" ignored payments/returns and was clamped at 0)
+            if ($sup_id > 0) syncSupplierLedger($pdo, $sup_id);
 
             $pdo->commit();
         }

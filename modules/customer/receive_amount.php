@@ -80,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $cust = getById('customers', $customer_id);
     if (!$cust) { redirect('receive_amount.php', 'Customer not found.', 'error'); }
 
-    $voucher = 'RCPT-' . str_pad((countRows('customer_payments') + 1), 4, '0', STR_PAD_LEFT);
+    $voucher = nextUniqueVoucher($pdo, 'customer_payments', 'RCPT-'); // COUNT+1 collided after deletions
 
     $pdo->beginTransaction();
     try {

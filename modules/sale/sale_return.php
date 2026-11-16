@@ -205,7 +205,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
 
             if ($ret_data) {
                 // 1. Fetch return items to revert stock
-                $stmt_ritems = $pdo->prepare("SELECT product_id, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
+                $stmt_ritems = $pdo->prepare("SELECT product_id, batch_no, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
                 $stmt_ritems->execute([$del_id, $del_id]);
                 $ritems = $stmt_ritems->fetchAll(PDO::FETCH_ASSOC);
 
@@ -215,6 +215,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
                     $cond = $ri['condition'] ?? 'Good';
                     if ($cond === 'Good / Resalable' || $cond === 'Good') {
                         $stmt_sub_stock->execute([$ri['quantity'], $ri['product_id']]);
+                        adjustBatchStock($pdo, $ri['product_id'], $ri['batch_no'] ?? null, -(int)$ri['quantity']); // batch stock too
                     }
                 }
 
@@ -225,10 +226,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
                 $bank_acc_id = !empty($ret_data['bank_account_id']) ? intval($ret_data['bank_account_id']) : 0;
                 $cust_id = intval($ret_data['customer_id'] ?? 0);
 
+                // Remove this return's refund from the cash book / bank book (bank balance restored there)
+                reverseReturnRefund($pdo, $del_id);
                 if ($refund_type === 'Cash Refund' && $cash_acc_id > 0) {
                     $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$ret_amt, $cash_acc_id]);
                 } elseif ($refund_type === 'Bank Refund' && $bank_acc_id > 0) {
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $bank_acc_id]);
+                    // bank balance already restored by reverseReturnRefund()
                 } elseif ($refund_type === 'Deduct Balance' || $refund_type === 'Store Credit' || $refund_type === 'Credit Note' || $refund_type === 'Adjust / Deduct Customer Balance') {
                     if ($cust_id > 0 && $ret_amt > 0) {
                         $pdo->prepare("UPDATE customers SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $cust_id]);
@@ -350,24 +353,27 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_return']
 
             // 2. Insert line items & replenish inventory stock
             $stmt_item = $pdo->prepare("
-                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, quantity, unit_price, total_price, `condition`)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, batch_no, quantity, unit_price, total_price, `condition`)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
 
             foreach ($validated_return_items as $vi) {
-                $stmt_item->execute([$return_id, $return_id, $vi['product_id'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
+                // No invoice -> returned stock goes to the product's latest batch (recorded on the line)
+                $ret_batch = returnBatchNo($pdo, $vi['product_id'], '');
+                $stmt_item->execute([$return_id, $return_id, $vi['product_id'], $ret_batch, $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
                 if ($vi['condition'] === 'Good / Resalable' || $vi['condition'] === 'Good') {
                     $stmt_stock->execute([$vi['quantity'], $vi['product_id']]);
+                    adjustBatchStock($pdo, $vi['product_id'], $ret_batch, (int)$vi['quantity']);
                 }
             }
 
             // 3. Deduct accounts if Cash or Bank Refund selected
             if ($refund_type === 'Cash Refund' && $cash_account_id) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
-            } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
-                $pdo->prepare("UPDATE bank_accounts SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
             }
+            // Record the refund in the cash book / bank book (bank balance is deducted there)
+            recordReturnRefund($pdo, $return_id, $return_date, $refund_type, $total_return_amount, $bank_account_id, "Sale Return #{$return_no} refund");
 
             $pdo->commit();
 
@@ -420,15 +426,25 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_invoice_
 
             // Sold quantities for this invoice (per product)
             $sold_map = [];
-            $stmt_s = $pdo->prepare("SELECT product_id, batch_no, quantity, unit_price FROM sale_items WHERE invoice_id = ?");
+            // Customer is credited what they actually paid per unit (line total after the product
+            // discount and the invoice order discount) — same rule edit_sale_return.php already uses.
+            // Previously the posted rate (gross TP) was accepted, crediting more than was paid.
+            $inv_hdr = $pdo->prepare("SELECT grand_total, (SELECT COALESCE(SUM(total_amount),0) FROM sale_items WHERE invoice_id = ?) AS items_total FROM sales_invoices WHERE id = ?");
+            $inv_hdr->execute([$invoice_id, $invoice_id]);
+            $inv_hdr_row = $inv_hdr->fetch(PDO::FETCH_ASSOC);
+            $order_factor = ($inv_hdr_row && (float)$inv_hdr_row['items_total'] > 0)
+                ? min(1.0, (float)$inv_hdr_row['grand_total'] / (float)$inv_hdr_row['items_total']) : 1.0;
+
+            $stmt_s = $pdo->prepare("SELECT product_id, batch_no, quantity, unit_price, total_amount FROM sale_items WHERE invoice_id = ?");
             $stmt_s->execute([$invoice_id]);
             foreach ($stmt_s->fetchAll(PDO::FETCH_ASSOC) as $s) {
                 $pid = (int)$s['product_id'];
                 if (!isset($sold_map[$pid])) {
-                    $sold_map[$pid] = ['qty' => 0, 'batch' => $s['batch_no'], 'price' => (float)$s['unit_price']];
+                    $sold_map[$pid] = ['qty' => 0, 'batch' => $s['batch_no'], 'price' => 0.0, 'paid' => 0.0];
                 }
-                $sold_map[$pid]['qty'] += (int)$s['quantity'];
-                $sold_map[$pid]['price'] = (float)$s['unit_price'];
+                $sold_map[$pid]['qty']  += (int)$s['quantity'];
+                $sold_map[$pid]['paid'] += (float)$s['total_amount'] * $order_factor;
+                $sold_map[$pid]['price'] = $sold_map[$pid]['qty'] > 0 ? round($sold_map[$pid]['paid'] / $sold_map[$pid]['qty'], 2) : 0.0;
                 if (empty($sold_map[$pid]['batch']) && !empty($s['batch_no'])) {
                     $sold_map[$pid]['batch'] = $s['batch_no'];
                 }
@@ -448,7 +464,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_invoice_
                 $returnable = max(0, (int)$sold_map[$pid]['qty'] - ($ret_map[$pid] ?? 0));
                 if ($qty > $returnable) $qty = $returnable;
                 if ($qty <= 0) continue;
-                if ($price <= 0) $price = (float)$sold_map[$pid]['price'];
+                // Never credit more per unit than the customer paid on this invoice
+                $paid_unit = (float)$sold_map[$pid]['price'];
+                if ($price <= 0 || $price > $paid_unit) $price = $paid_unit;
 
                 $line = round($qty * $price, 2);
                 $total_return_amount += $line;
@@ -495,6 +513,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_invoice_
             $stmt_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE product_id = ? AND batch_no = ?");
 
             foreach ($validated as $vi) {
+                // Batch it was sold from; if that batch no longer exists (DEFAULT / renamed) -> latest batch
+                $vi['batch_no'] = returnBatchNo($pdo, $vi['product_id'], $vi['batch_no'] ?? '');
                 $stmt_item->execute([
                     $return_id, $return_id, $vi['product_id'],
                     !empty($vi['batch_no']) ? $vi['batch_no'] : null,
@@ -503,18 +523,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['save_invoice_
 
                 if ($vi['condition'] === 'Good / Resalable' || $vi['condition'] === 'Good') {
                     $stmt_stock->execute([$vi['quantity'], $vi['product_id']]);
-                    if (!empty($vi['batch_no'])) {
-                        try { $stmt_batch->execute([$vi['quantity'], $vi['product_id'], $vi['batch_no']]); } catch (Exception $e) {}
-                    }
+                    adjustBatchStock($pdo, $vi['product_id'], $vi['batch_no'], (int)$vi['quantity']);
                 }
             }
 
             // Settle refund: cash / bank accounts
             if ($refund_type === 'Cash Refund' && $cash_account_id) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
-            } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
-                $pdo->prepare("UPDATE bank_accounts SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
             }
+            // Record the refund in the cash book / bank book (bank balance is deducted there)
+            recordReturnRefund($pdo, $return_id, $return_date, $refund_type, $total_return_amount, $bank_account_id, "Sale Return #{$return_no} refund");
             // 'Credit Note' customer-balance reduction is handled by updateCustomerBalance() below.
 
             $pdo->commit();

@@ -4,6 +4,7 @@ require_once __DIR__ . '/../../includes/header.php';
 
 $success_msg = "";
 $error_msg = "";
+ensureUdhaarTypeEnum($pdo); // 'Given' / 'Received' were not allowed by the column and saved as blank
 
 // Handle Form Submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {

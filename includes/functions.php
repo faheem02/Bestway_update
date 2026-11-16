@@ -483,6 +483,29 @@ if (!function_exists('syncSupplierLedger')) {
                 ];
             }
 
+            // Purchase returns adjusted against the supplier's balance (debit note) reduce what we owe.
+            // They were written straight into supplier_ledgers/suppliers but were missing here, so the
+            // next rebuild (any purchase, edit or payment) wiped them out of the supplier balance.
+            try {
+                $stmt_pr = $pdo->prepare("SELECT id, return_no, return_date, total_amount, reason FROM purchase_returns
+                    WHERE supplier_id = ? AND COALESCE(status, '') <> 'Cancelled'
+                      AND payment_method IN ('Adjust / Deduct Supplier Balance', 'Adjust / Deduct Customer Balance')
+                    ORDER BY return_date ASC, id ASC");
+                $stmt_pr->execute([$supplier_id]);
+                foreach ($stmt_pr->fetchAll(PDO::FETCH_ASSOC) as $pr) {
+                    $txns[] = [
+                        'date'        => $pr['return_date'],
+                        'created_id'  => (int)$pr['id'],
+                        'sort_order'  => 15,
+                        'type'        => 'Purchase Return',
+                        'ref'         => $pr['return_no'],
+                        'debit'       => (float)$pr['total_amount'],
+                        'credit'      => 0.0,
+                        'description' => 'Debit Note / Return #' . $pr['return_no'] . (!empty($pr['reason']) ? ' | Reason: ' . $pr['reason'] : '')
+                    ];
+                }
+            } catch (Exception $e) {}
+
             usort($txns, function($a, $b) {
                 $cmp = strcmp($a['date'], $b['date']);
                 if ($cmp !== 0) return $cmp;
@@ -807,6 +830,198 @@ if (!function_exists('syncDeliveryChallansFromInvoices')) {
                 createDeliveryChallanForInvoice($pdo, (int)$inv_id);
             }
         } catch (Exception $e) {}
+    }
+}
+
+// ---- Batch-wise costing (Bug #1) ----
+if (!function_exists('ensureSaleItemCostColumn')) {
+    /**
+     * Makes sure sale_items.cost_price exists (unit purchase cost of the batch
+     * the item was sold from, captured at the moment of sale).
+     * NULL = cost not known (old sales recorded before this column existed).
+     * Must be called OUTSIDE a transaction: ALTER TABLE commits implicitly.
+     */
+    function ensureSaleItemCostColumn($pdo) {
+        static $checked = false;
+        if ($checked || !$pdo) return;
+        try {
+            $has = $pdo->query("SHOW COLUMNS FROM sale_items LIKE 'cost_price'")->fetch();
+            if (!$has) {
+                $pdo->exec("ALTER TABLE sale_items ADD COLUMN cost_price DECIMAL(12,2) NULL DEFAULT NULL AFTER total_price");
+            }
+            $checked = true;
+        } catch (Exception $e) {}
+    }
+}
+
+if (!function_exists('recordReturnRefund')) {
+    /**
+     * Sale return refunds paid out in cash / bank were never written to the cash book or
+     * bank book (only cash_accounts / bank_accounts balances were touched, and cash_accounts
+     * is often empty). Records the refund as an outflow linked to the return.
+     * Bank: recordBankOutflow() also deducts bank_accounts.current_balance — callers must NOT
+     * deduct it again.
+     */
+    function recordReturnRefund($pdo, $return_id, $date, $refund_type, $amount, $bank_account_id, $desc, $ref_type = 'sale_return') {
+        $amount = (float)$amount;
+        if ($amount <= 0) return;
+        $uid = $_SESSION['user_id'] ?? 1;
+        // Sale return: we pay the customer (outflow). Purchase return: supplier pays us (inflow).
+        $inflow = ($ref_type === 'purchase_return');
+        if ($refund_type === 'Cash Refund') {
+            $inflow ? recordCashInflow($pdo, $date, $amount, $desc, $ref_type, (int)$return_id, $uid)
+                    : recordCashOutflow($pdo, $date, $amount, $desc, $ref_type, (int)$return_id, $uid);
+        } elseif ($refund_type === 'Bank Refund' && (int)$bank_account_id > 0) {
+            $inflow ? recordBankInflow($pdo, $date, $amount, $desc, $ref_type, (int)$return_id, $uid, (int)$bank_account_id)
+                    : recordBankOutflow($pdo, $date, $amount, $desc, $ref_type, (int)$return_id, $uid, (int)$bank_account_id);
+        }
+    }
+}
+
+if (!function_exists('reverseReturnRefund')) {
+    // Kept for readability at return call sites; same as reverseBookEntries().
+    function reverseReturnRefund($pdo, $return_id, $ref_type = 'sale_return') {
+        reverseBookEntries($pdo, $ref_type, $return_id);
+    }
+}
+
+if (!function_exists('reverseBookEntries')) {
+    /**
+     * Removes every cash-book / bank-book entry recorded for one reference
+     * (e.g. 'sale_return' 12, 'purchase' 40, 'supplier_payment' 7) and undoes its effect on
+     * bank_accounts.current_balance. Cash-book day totals are recomputed.
+     */
+    function reverseBookEntries($pdo, $ref_type, $return_id) {
+        $cb = $pdo->prepare("SELECT DISTINCT daily_id FROM cash_book WHERE reference_type = ? AND reference_id = ?");
+        $cb->execute([$ref_type, (int)$return_id]);
+        $days = $cb->fetchAll(PDO::FETCH_COLUMN);
+        $pdo->prepare("DELETE FROM cash_book WHERE reference_type = ? AND reference_id = ?")->execute([$ref_type, (int)$return_id]);
+        foreach ($days as $d) { if ($d) recomputeCashDayTotals($pdo, (int)$d); }
+
+        $bt = $pdo->prepare("SELECT id, bank_account_id, amount, transaction_type FROM bank_transactions WHERE reference_type = ? AND reference_id = ?");
+        $bt->execute([$ref_type, (int)$return_id]);
+        foreach ($bt->fetchAll(PDO::FETCH_ASSOC) as $t) {
+            $sign = ($t['transaction_type'] === 'deposit') ? -1 : 1; // undo the original movement
+            $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$sign * (float)$t['amount'], (int)$t['bank_account_id']]);
+            $pdo->prepare("DELETE FROM bank_transactions WHERE id = ?")->execute([(int)$t['id']]);
+        }
+    }
+}
+
+if (!function_exists('purchaseReturnUnitPrice')) {
+    /**
+     * Debit-note rate for returning goods to the supplier = what the bill actually charged per
+     * unit (line total / qty, after supplier discount, GST and the bill discount). The return form
+     * posts the gross TP rate, which reduced the supplier balance by more than was ever billed.
+     * The posted rate is kept only when it is lower (e.g. damaged goods accepted at less).
+     */
+    function purchaseReturnUnitPrice($pdo, $purchase_item_id, $posted_price) {
+        $posted_price = (float)$posted_price;
+        if ((int)$purchase_item_id <= 0) return $posted_price;
+        try {
+            $st = $pdo->prepare("SELECT pi.quantity, pi.total_price, p.subtotal, p.discount_amount
+                FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id WHERE pi.id = ? LIMIT 1");
+            $st->execute([(int)$purchase_item_id]);
+            $r = $st->fetch(PDO::FETCH_ASSOC);
+            if (!$r || (int)$r['quantity'] <= 0) return $posted_price;
+            $bill_ratio = ((float)$r['subtotal'] > 0) ? max(0.0, 1 - (float)$r['discount_amount'] / (float)$r['subtotal']) : 1.0;
+            $billed_unit = round((float)$r['total_price'] * $bill_ratio / (int)$r['quantity'], 2);
+            if ($billed_unit > 0 && ($posted_price <= 0 || $posted_price > $billed_unit)) return $billed_unit;
+        } catch (Exception $e) {}
+        return $posted_price;
+    }
+}
+
+if (!function_exists('returnBatchNo')) {
+    /**
+     * Batch that returned (resalable) stock goes back into. Sale returns restored product stock
+     * only, so batch stock fell behind product stock and was later "synced" down, losing units.
+     * Uses the batch the item was sold from when it exists; otherwise (direct returns without an
+     * invoice, or a renamed/missing batch) the product's most recently added batch.
+     * Returns null when the product has no batch at all.
+     */
+    function returnBatchNo($pdo, $product_id, $preferred_batch_no = '') {
+        $pref = trim((string)$preferred_batch_no);
+        if ($pref !== '' && strtoupper($pref) !== 'DEFAULT') {
+            $st = $pdo->prepare("SELECT batch_no FROM product_batches WHERE product_id = ? AND batch_no = ? LIMIT 1");
+            $st->execute([(int)$product_id, $pref]);
+            $b = $st->fetchColumn();
+            if ($b !== false) return $b;
+        }
+        $st = $pdo->prepare("SELECT batch_no FROM product_batches WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+        $st->execute([(int)$product_id]);
+        $b = $st->fetchColumn();
+        return ($b !== false) ? $b : null;
+    }
+}
+
+if (!function_exists('adjustBatchStock')) {
+    /** Adds (positive) or removes (negative) units on one batch of a product. */
+    function adjustBatchStock($pdo, $product_id, $batch_no, $delta) {
+        if ($batch_no === null || trim((string)$batch_no) === '' || (int)$delta === 0) return;
+        $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock + ?) WHERE product_id = ? AND batch_no = ?")
+            ->execute([(int)$delta, (int)$product_id, trim((string)$batch_no)]);
+    }
+}
+
+if (!function_exists('nextUniqueVoucher')) {
+    /**
+     * Next free voucher number like RCPT-0007 for a table with a UNIQUE voucher_no.
+     * COUNT(*)+1 repeated an existing number after any deletion and the save failed.
+     */
+    function nextUniqueVoucher($pdo, $table, $prefix) {
+        $n = (int)$pdo->query("SELECT COALESCE(MAX(id), 0) + 1 FROM `{$table}`")->fetchColumn();
+        $chk = $pdo->prepare("SELECT 1 FROM `{$table}` WHERE voucher_no = ? LIMIT 1");
+        for ($i = 0; $i < 1000; $i++, $n++) {
+            $v = $prefix . str_pad((string)$n, 4, '0', STR_PAD_LEFT);
+            $chk->execute([$v]);
+            if (!$chk->fetchColumn()) return $v;
+        }
+        return $prefix . date('YmdHis');
+    }
+}
+
+if (!function_exists('ensureUdhaarTypeEnum')) {
+    /**
+     * The Credit Book (udhaar_book) code writes type 'Given' / 'Received', but the column
+     * only allowed 'Payable','Receivable', so MySQL (non-strict) stored every type as blank.
+     * Adds the two values the application uses; existing rows are not changed.
+     * Must be called OUTSIDE a transaction: ALTER TABLE commits implicitly.
+     */
+    function ensureUdhaarTypeEnum($pdo) {
+        static $checked = false;
+        if ($checked || !$pdo) return;
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM udhaar_book LIKE 'type'")->fetch(PDO::FETCH_ASSOC);
+            if ($col && stripos($col['Type'], "'Given'") === false) {
+                $pdo->exec("ALTER TABLE udhaar_book MODIFY COLUMN `type` ENUM('Payable','Receivable','Given','Received') DEFAULT 'Receivable'");
+            }
+            $checked = true;
+        } catch (Exception $e) {}
+    }
+}
+
+if (!function_exists('batchUnitCost')) {
+    /**
+     * Unit purchase cost of one batch, or null when the batch is not found
+     * or has no cost recorded (never guessed).
+     */
+    function batchUnitCost($pdo, $product_id, $batch_id = 0, $batch_no = '') {
+        try {
+            if ((int)$batch_id > 0) {
+                $st = $pdo->prepare("SELECT purchase_price FROM product_batches WHERE id = ? AND product_id = ? LIMIT 1");
+                $st->execute([(int)$batch_id, (int)$product_id]);
+            } elseif (trim((string)$batch_no) !== '') {
+                $st = $pdo->prepare("SELECT purchase_price FROM product_batches WHERE product_id = ? AND batch_no = ? ORDER BY id DESC LIMIT 1");
+                $st->execute([(int)$product_id, trim((string)$batch_no)]);
+            } else {
+                return null;
+            }
+            $c = $st->fetchColumn();
+            return ($c !== false && $c !== null && (float)$c > 0) ? round((float)$c, 2) : null;
+        } catch (Exception $e) {
+            return null;
+        }
     }
 }
 

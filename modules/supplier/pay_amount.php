@@ -40,7 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $supplier = getById('suppliers', $supplier_id);
     if (!$supplier) { redirect('pay_amount.php', 'Supplier not found', 'error'); }
 
-    $voucher = 'PAY-' . str_pad((countRows('supplier_payments') + 1), 4, '0', STR_PAD_LEFT);
+    $voucher = nextUniqueVoucher($pdo, 'supplier_payments', 'PAY-'); // COUNT+1 collided after deletions
 
     $pdo->beginTransaction();
     try {

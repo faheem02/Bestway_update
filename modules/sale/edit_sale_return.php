@@ -123,7 +123,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
             $conn->begin_transaction();
 
             // 1. Fetch current items in DB to revert prior stock restoration
-            $stmt_old_items = $pdo->prepare("SELECT product_id, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
+            $stmt_old_items = $pdo->prepare("SELECT product_id, batch_no, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
             $stmt_old_items->execute([$id, $id]);
             $old_items = $stmt_old_items->fetchAll(PDO::FETCH_ASSOC);
 
@@ -132,6 +132,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
                 $cond = $oi['condition'] ?? 'Good';
                 if ($cond === 'Good / Resalable' || $cond === 'Good') {
                     $stmt_sub_stock->execute([$oi['quantity'], $oi['product_id']]);
+                    adjustBatchStock($pdo, $oi['product_id'], $oi['batch_no'] ?? null, -(int)$oi['quantity']); // batch stock too
                 }
             }
 
@@ -141,10 +142,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
             $old_cash_id = !empty($return_data['cash_account_id']) ? intval($return_data['cash_account_id']) : 0;
             $old_bank_id = !empty($return_data['bank_account_id']) ? intval($return_data['bank_account_id']) : 0;
 
+            // Remove the old refund from the cash book / bank book (bank balance restored there)
+            reverseReturnRefund($pdo, $id);
             if ($old_ref_type === 'Cash Refund' && $old_cash_id > 0) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$old_total, $old_cash_id]);
             } elseif ($old_ref_type === 'Bank Refund' && $old_bank_id > 0) {
-                $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$old_total, $old_bank_id]);
+                // bank balance already restored by reverseReturnRefund()
             } elseif ($old_ref_type === 'Deduct Balance' || $old_ref_type === 'Store Credit' || $old_ref_type === 'Credit Note' || $old_ref_type === 'Adjust / Deduct Customer Balance') {
                 if ($customer_id > 0 && $old_total > 0) {
                     $pdo->prepare("UPDATE customers SET current_balance = current_balance + ? WHERE id = ?")->execute([$old_total, $customer_id]);
@@ -153,7 +156,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
 
             // 3. Process updated items
             $sold_map = [];
-            $stmt_sold = $conn->prepare("SELECT id, product_id, item_name, quantity, total_price FROM sale_items WHERE invoice_id = ?");
+            $stmt_sold = $conn->prepare("SELECT id, product_id, item_name, quantity, total_price, batch_no FROM sale_items WHERE invoice_id = ?");
             if ($stmt_sold) {
                 $stmt_sold->bind_param("i", $invoice_id);
                 $stmt_sold->execute();
@@ -212,7 +215,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
                         'quantity'   => $ret_qty,
                         'price'      => $unit_price,
                         'total'      => $line_ret,
-                        'condition'  => $condition
+                        'condition'  => $condition,
+                        'batch_no'   => returnBatchNo($pdo, $pid, $line['batch_no'] ?? '')
                     ];
 
                     $line_cursor[$pid] = $cursor + 1;
@@ -228,7 +232,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
                         'quantity'   => $ret_qty,
                         'price'      => $unit_price,
                         'total'      => $line_ret,
-                        'condition'  => $condition
+                        'condition'  => $condition,
+                        'batch_no'   => returnBatchNo($pdo, $pid, '')
                     ];
                 }
             }
@@ -241,15 +246,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
             $pdo->prepare("DELETE FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?")->execute([$id, $id]);
 
             $stmt_ins_item = $pdo->prepare("
-                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, quantity, unit_price, total_price, `condition`)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sale_return_items (return_id, sale_return_id, product_id, batch_no, quantity, unit_price, total_price, `condition`)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt_add_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
 
             foreach ($validated_return_items as $vi) {
-                $stmt_ins_item->execute([$id, $id, $vi['product_id'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
+                $stmt_ins_item->execute([$id, $id, $vi['product_id'], $vi['batch_no'], $vi['quantity'], $vi['price'], $vi['total'], $vi['condition']]);
                 if ($vi['condition'] === 'Good / Resalable') {
                     $stmt_add_stock->execute([$vi['quantity'], $vi['product_id']]);
+                    adjustBatchStock($pdo, $vi['product_id'], $vi['batch_no'], (int)$vi['quantity']);
                 }
             }
 
@@ -260,9 +266,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_return
                 }
             } elseif ($refund_type === 'Cash Refund' && $cash_account_id) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
-            } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
-                $pdo->prepare("UPDATE bank_accounts SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
             }
+            // Record the (new) refund in the cash book / bank book (bank balance is deducted there)
+            recordReturnRefund($pdo, $id, $return_date, $refund_type, $total_return_amount, $bank_account_id, "Sale Return #" . ($return_data['return_no'] ?? $id) . " refund (edited)");
 
             // 6. Update sale_returns header
             $stmt_up_ret = $pdo->prepare("

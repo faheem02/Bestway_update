@@ -225,7 +225,49 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
     // Items array
     $items = $_POST['items'] ?? [];
 
-    if ($supplier_id <= 0) {
+    // Server-side recalculation of every line and of the bill totals (same formula as the form:
+    // gross = qty x rate, disc = gross x disc%, GST on (gross - disc), each step rounded to 2dp).
+    // The totals posted by the browser were trusted before — bills were saved with total 0.
+    if (is_array($items)) {
+        $calc_subtotal = 0.0;
+        $calc_tax      = 0.0;
+        foreach ($items as $k => $itm) {
+            $q_  = max(0, intval($itm['quantity'] ?? 0));
+            $b_  = max(0, intval($itm['bonus_quantity'] ?? 0));
+            $c_  = floatval($itm['purchase_price'] ?? 0);
+            $dp_ = floatval($itm['discount_percent'] ?? 0);
+            $tp_ = floatval($itm['tax_percent'] ?? 0);
+            $g_  = $q_ * $c_;
+            $da_ = round($g_ * ($dp_ / 100), 2);
+            $nb_ = max(0, round($g_ - $da_, 2));
+            $ta_ = round($nb_ * ($tp_ / 100), 2);
+            $rt_ = max(0, round($nb_ + $ta_, 2));
+            $items[$k]['discount_amount'] = $da_;
+            $items[$k]['tax_amount']      = $ta_;
+            $items[$k]['total_price']     = $rt_;
+            if (intval($itm['product_id'] ?? 0) > 0 && ($q_ + $b_) > 0) {
+                $calc_subtotal += $rt_;
+                $calc_tax      += $ta_;
+            }
+        }
+        $subtotal        = round($calc_subtotal, 2);
+        $tax_amount      = round($calc_tax, 2);
+        $discount_amount = max(0, min($discount_amount, $subtotal));
+        $grand_total     = round(max(0, $subtotal - $discount_amount + $freight_charges), 2);
+    }
+
+    // Same supplier bill saved twice (double click / page refresh) creates a duplicate payable
+    $dup_bill = false;
+    if ($db_connected && $pdo && $supplier_id > 0 && $bill_no !== '') {
+        $dup_st = $pdo->prepare("SELECT id FROM purchases WHERE supplier_id = ? AND bill_no = ? LIMIT 1");
+        $dup_st->execute([$supplier_id, $bill_no]);
+        $dup_bill = (bool)$dup_st->fetchColumn();
+    }
+
+    if ($dup_bill) {
+        $message = "Bill # {$bill_no} is already saved for this supplier. Duplicate not saved.";
+        $msg_type = "danger";
+    } elseif ($supplier_id <= 0) {
         $message = "Please select a supplier.";
         $msg_type = "danger";
     } elseif (empty($items) || !is_array($items)) {
@@ -321,8 +363,10 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                 foreach ($items as $itm) {
                     $pid         = intval($itm['product_id'] ?? 0);
                     $batch_no    = strtoupper(trim($itm['batch_no'] ?? ''));
-                    if ($batch_no === '') {
-                        $batch_no = 'DEFAULT';
+                    if ($batch_no === '' || $batch_no === 'DEFAULT') {
+                        // No batch number entered: give this purchase its own batch instead of
+                        // adding the stock into an old (possibly sold-out) shared 'DEFAULT' batch.
+                        $batch_no = 'AUTO-' . $purchase_id;
                     }
                     $expiry_date = !empty($itm['expiry_date']) ? $itm['expiry_date'] : date('Y-m-d', strtotime('+2 years'));
                     
@@ -423,20 +467,17 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                     }
                 }
 
-                // Sync products.current_stock with total batches
-                if (!empty($impacted_pids)) {
-                    $sync_prod_stmt = $pdo->prepare("UPDATE products SET current_stock = (SELECT COALESCE(SUM(current_stock), 0) FROM product_batches WHERE product_id = ?) WHERE id = ?");
-                    foreach (array_keys($impacted_pids) as $ip_id) {
-                        $sync_prod_stmt->execute([$ip_id, $ip_id]);
-                    }
-                }
+                // NOTE: products.current_stock was already increased above by the received qty.
+                // It is no longer overwritten with SUM(batch stock): where batch stock had drifted
+                // (e.g. sale returns restored product stock only) that overwrite silently deleted units.
 
                 // 3. Supplier Ledger Update & Sync
                 syncSupplierLedger($pdo, $supplier_id);
 
                 // 4. Record Payment in Supplier Payments & Cash/Bank Book if Paid Amount > 0
                 if ($paid_amount > 0) {
-                    $voucher_no = "PV-" . date('Ymd') . "-" . rand(100, 999);
+                    // Unique per purchase (rand(100,999) could repeat and fail the UNIQUE voucher_no)
+                    $voucher_no = "PV-" . date('Ymd') . "-P" . $purchase_id;
                     $stmt_spay = $pdo->prepare("
                         INSERT INTO supplier_payments (
                             voucher_no, payment_date, supplier_id, purchase_id,
@@ -476,7 +517,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (isset($_POST['save_purchas
                         if ($bank_account_id > 0) {
                             $bank_pay_desc = "Bank Transfer on Purchase Bill #{$bill_no} - {$s_p_name}";
                             // Update Bank Account Balance
-                            $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance - ? WHERE id = ?")->execute([$paid_amount, $bank_account_id]);
+                            // recordBankOutflow() already deducts bank_accounts.current_balance (was double-counted)
                             // Record in Bank Book (visible in Bankbook module)
                             recordBankOutflow($pdo, $purchase_date, $paid_amount, $bank_pay_desc, 'purchase', $purchase_id, $user_id, $bank_account_id);
                         }

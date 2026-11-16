@@ -22,7 +22,7 @@ if ($db_connected && $pdo && $id > 0) {
 
         if ($ret_data) {
             // 1. Fetch return items to revert stock
-            $stmt_ritems = $pdo->prepare("SELECT product_id, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
+            $stmt_ritems = $pdo->prepare("SELECT product_id, batch_no, quantity, `condition` FROM sale_return_items WHERE return_id = ? OR sale_return_id = ?");
             $stmt_ritems->execute([$id, $id]);
             $ritems = $stmt_ritems->fetchAll(PDO::FETCH_ASSOC);
 
@@ -32,6 +32,7 @@ if ($db_connected && $pdo && $id > 0) {
                 $cond = $ri['condition'] ?? 'Good';
                 if ($cond === 'Good / Resalable' || $cond === 'Good') {
                     $stmt_sub_stock->execute([$ri['quantity'], $ri['product_id']]);
+                    adjustBatchStock($pdo, $ri['product_id'], $ri['batch_no'] ?? null, -(int)$ri['quantity']); // batch stock too
                 }
             }
 
@@ -42,10 +43,12 @@ if ($db_connected && $pdo && $id > 0) {
             $bank_acc_id = !empty($ret_data['bank_account_id']) ? intval($ret_data['bank_account_id']) : 0;
             $cust_id = intval($ret_data['customer_id'] ?? 0);
 
+            // Remove this return's refund from the cash book / bank book (bank balance restored there)
+            reverseReturnRefund($pdo, $id);
             if ($refund_type === 'Cash Refund' && $cash_acc_id > 0) {
                 $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$ret_amt, $cash_acc_id]);
             } elseif ($refund_type === 'Bank Refund' && $bank_acc_id > 0) {
-                $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $bank_acc_id]);
+                // bank balance already restored by reverseReturnRefund()
             } elseif ($refund_type === 'Deduct Balance' || $refund_type === 'Store Credit' || $refund_type === 'Credit Note' || $refund_type === 'Adjust / Deduct Customer Balance') {
                 if ($cust_id > 0 && $ret_amt > 0) {
                     $pdo->prepare("UPDATE customers SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $cust_id]);

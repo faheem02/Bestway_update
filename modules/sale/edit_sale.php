@@ -205,21 +205,44 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         $msg_type = "danger";
     } else {
         try {
+            // Batch-wise costing: make sure sale_items.cost_price exists (must run before the transaction)
+            ensureSaleItemCostColumn($pdo);
+            ensureUdhaarTypeEnum($pdo); // allow 'Given' in Credit Book (was stored blank)
+
             $conn->begin_transaction();
             if ($db_connected && $pdo) {
                 $pdo->beginTransaction();
             }
 
+            // Invoice as it was BEFORE this edit (needed to reverse its old cash/bank entry).
+            // NB: $invoice is only loaded further down the page, after this POST handler.
+            // (no FOR UPDATE: the invoice row is updated through the separate mysqli connection $conn,
+            //  a PDO row lock here would make that UPDATE wait on itself)
+            $old_inv_stmt = $pdo->prepare("SELECT * FROM sales_invoices WHERE id = ?");
+            $old_inv_stmt->execute([$id]);
+            $old_inv = $old_inv_stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$old_inv) {
+                throw new Exception("Invoice not found.");
+            }
+            // Receipts taken later against this invoice (Receive Amount) — recorded in cash/bank on their own
+            $lr_stmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM customer_payments WHERE sale_id = ?");
+            $lr_stmt->execute([$id]);
+            $linked_receipts = (float)$lr_stmt->fetchColumn();
+
             // STEP 1: Fetch old items and REVERT their quantities to stock (Both product stock and batch stock)
-            $old_items_stmt = $conn->prepare("SELECT product_id, quantity, discount_percent, batch_id, batch_no FROM sale_items WHERE invoice_id = ?");
+            $old_items_stmt = $conn->prepare("SELECT product_id, quantity, discount_percent, batch_id, batch_no, cost_price FROM sale_items WHERE invoice_id = ?");
             $old_items_stmt->bind_param("i", $id);
             $old_items_stmt->execute();
             $old_res = $old_items_stmt->get_result();
             $old_items = $old_res->fetch_all(MYSQLI_ASSOC);
             $old_items_stmt->close();
             $old_item_discounts = [];
+            $old_item_costs = []; // "product_id|BATCH" => cost captured when the invoice was first saved
             foreach ($old_items as $old_item) {
                 $old_item_discounts[(int)$old_item['product_id']] = (float)$old_item['discount_percent'];
+                if ($old_item['cost_price'] !== null && (float)$old_item['cost_price'] > 0) {
+                    $old_item_costs[(int)$old_item['product_id'] . '|' . strtoupper(trim((string)$old_item['batch_no']))] = (float)$old_item['cost_price'];
+                }
             }
 
             if ($db_connected && $pdo) {
@@ -244,6 +267,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             // STEP 2: Validate new items against fresh database stock
             $validated_items = [];
+            $requested_by_pid = []; // total qty asked per product across ALL rows (same product can be on several rows)
             $subtotal = 0;
             $total_discount_cut = 0;
 
@@ -281,6 +305,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 if ($avail_stock <= 0) {
                     throw new Exception("⚠️ Error: Product '{$p_name}' is out of stock (Stock: 0)!");
                 }
+                $requested_by_pid[$pid] = ($requested_by_pid[$pid] ?? 0) + $qty;
+                if ($requested_by_pid[$pid] > $avail_stock) {
+                    throw new Exception("Error: Total quantity of '{$p_name}' on this invoice is {$requested_by_pid[$pid]}, but available stock is only {$avail_stock}.");
+                }
                 if ($qty > $avail_stock) {
                     throw new Exception("⚠️ Error: Product '{$p_name}' has only {$avail_stock} in stock, but entered quantity is {$qty}!");
                 }
@@ -295,7 +323,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
 
                 $gross = $qty * $tp;
-                $net   = $gross - ($gross * ($disc / 100));
+                // Rounded per line exactly as stored in sale_items, so the invoice total = sum of its lines
+                $net   = round($gross - ($gross * ($disc / 100)), 2);
 
                 $subtotal += $gross;
                 $total_discount_cut += ($gross - $net);
@@ -319,7 +348,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $order_discount_percent = isAdmin()
                 ? floatval($_POST['order_discount_percent'] ?? 0)
                 : max(0.0, min(100.0, (float)$existing_order_discount));
-            $order_discount_amount  = $items_net * ($order_discount_percent / 100);
+            $order_discount_amount  = round($items_net * ($order_discount_percent / 100), 2);
             $total_discount_cut    += $order_discount_amount;
 
             $shipping_cost    = 0.00;
@@ -327,10 +356,12 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $round_off        = floatval($_POST['round_off'] ?? 0);
             $grand_total      = ($items_net - $order_discount_amount) + $round_off;
 
+            // Same rule as new_sale.php: the previous balance is shown for reference only and is
+            // NOT part of this invoice (the customer ledger carries it). Adding it here doubled the due.
             $previous_balance = floatval($_POST['previous_balance'] ?? 0);
-            $net_payable      = $grand_total + $previous_balance;
+            $net_payable      = $grand_total;
             $paid_amount      = floatval($_POST['paid_amount'] ?? 0);
-            $balance_due      = $net_payable - $paid_amount;
+            $balance_due      = max(0, $grand_total - $paid_amount);
 
             // STEP 3: Update parent invoice
             $upd_stmt = $conn->prepare("
@@ -342,7 +373,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     route_id = ?, route_name = ?, notes = ?
                 WHERE id = ?
             ");
-            $upd_stmt->bind_param("sssssiiddddddddddisissi",
+            // subtotal is a decimal ('d'); it was bound as integer ('i') and lost its paisa on every edit
+            $upd_stmt->bind_param("sssssidddddddddddisissi",
                 $customer_name, $invoice_date, $payment_terms, $payment_method,
                 $cash_account_id, $bank_account_id,
                 $subtotal, $total_discount_cut, $order_discount_percent, $shipping_cost, $adjustment, $round_off,
@@ -358,14 +390,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             $stmt_si = $pdo->prepare("
                 INSERT INTO sale_items 
-                (invoice_id, sale_id, product_id, item_name, batch_id, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price) 
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (invoice_id, sale_id, product_id, item_name, batch_id, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price, cost_price)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmt_deduct_stock = $pdo->prepare("UPDATE products SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
             $stmt_deduct_batch_id = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
             $stmt_deduct_batch_no = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE product_id = ? AND batch_no = ?");
             $stmt_get_batch_info = $pdo->prepare("SELECT id, batch_no, expiry_date FROM product_batches WHERE id = ? LIMIT 1");
-            $stmt_batches_fifo = $pdo->prepare("SELECT id, batch_no, expiry_date, current_stock FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY expiry_date ASC, id ASC");
+            $stmt_batches_fifo = $pdo->prepare("SELECT id, batch_no, expiry_date, current_stock, purchase_price FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY expiry_date ASC, id ASC");
 
             foreach ($validated_items as $v_item) {
                 $pid   = $v_item['product_id'];
@@ -378,9 +410,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $b_id  = $v_item['batch_id'] ?? 0;
                 $b_no  = $v_item['batch_no'] ?? '';
                 $b_exp = $v_item['expiry_date'] ?? null;
+                $unit_cost = null; // purchase cost of the batch this line is sold from (Bug #1)
 
                 // 1. Deduct from selected batch if provided
                 if ($b_id > 0) {
+                    $unit_cost = batchUnitCost($pdo, $pid, $b_id);
                     $stmt_deduct_batch_id->execute([$qty, $b_id]);
                     if (empty($b_exp) || empty($b_no)) {
                         $stmt_get_batch_info->execute([$b_id]);
@@ -391,12 +425,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                         }
                     }
                 } elseif (!empty($b_no) && $b_no !== 'DEFAULT') {
+                    $unit_cost = batchUnitCost($pdo, $pid, 0, $b_no);
                     $stmt_deduct_batch_no->execute([$qty, $pid, $b_no]);
                 } else {
                     // Fallback to FIFO
                     $stmt_batches_fifo->execute([$pid]);
                     $batches = $stmt_batches_fifo->fetchAll(PDO::FETCH_ASSOC);
                     $rem_qty = $qty;
+                    $fifo_cost_total = 0.0;
+                    $fifo_cost_qty   = 0;
                     if (!empty($batches)) {
                         $b_no = $batches[0]['batch_no'] ?? 'DEFAULT';
                         $b_exp = !empty($batches[0]['expiry_date']) ? $batches[0]['expiry_date'] : null;
@@ -406,12 +443,23 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                             $deduct = min($rem_qty, $b_stock);
                             $stmt_deduct_batch_id->execute([$deduct, $b['id']]);
                             $rem_qty -= $deduct;
+                            if ($deduct > 0 && (float)$b['purchase_price'] > 0) {
+                                $fifo_cost_total += $deduct * (float)$b['purchase_price'];
+                                $fifo_cost_qty   += $deduct;
+                            }
                         }
                     }
+                    $unit_cost = ($fifo_cost_qty > 0) ? round($fifo_cost_total / $fifo_cost_qty, 2) : null;
                 }
 
                 if (empty($b_no)) {
                     $b_no = 'DEFAULT';
+                }
+
+                // Same product + same batch as before the edit -> keep the cost captured at the original sale
+                $cost_key = $pid . '|' . strtoupper(trim((string)$b_no));
+                if (isset($old_item_costs[$cost_key])) {
+                    $unit_cost = $old_item_costs[$cost_key];
                 }
 
                 // Insert into sale_items using PDO
@@ -429,25 +477,47 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     $disc,
                     $xdisc,
                     $l_net,
-                    $l_net
+                    $l_net,
+                    $unit_cost
                 ]);
 
                 // Deduct stock from inventory
                 $stmt_deduct_stock->execute([$qty, $pid]);
             }
 
-            // Update cash/bank balance and record in cashbook/bankbook
-            if ($paid_amount > 0) {
-                $book_desc = "Sale Invoice #{$invoice['invoice_no']} - {$customer_name} (Edited)";
+            // Update cash/bank balance and record in cashbook/bankbook.
+            // 1) Reverse whatever this invoice recorded before (it used to be added again on every edit).
+            $old_paid_at_sale = max(0.0, (float)$old_inv['paid_amount'] - $linked_receipts);
+            if ($old_inv['payment_method'] === 'Cash' && !empty($old_inv['cash_account_id']) && $old_paid_at_sale > 0) {
+                $pdo->prepare("UPDATE cash_accounts SET balance = balance - ? WHERE id = ?")->execute([$old_paid_at_sale, (int)$old_inv['cash_account_id']]);
+            }
+            $old_cash_days = $pdo->prepare("SELECT DISTINCT daily_id FROM cash_book WHERE reference_type = 'sale' AND reference_id = ?");
+            $old_cash_days->execute([$id]);
+            $old_cash_day_ids = $old_cash_days->fetchAll(PDO::FETCH_COLUMN);
+            $pdo->prepare("DELETE FROM cash_book WHERE reference_type = 'sale' AND reference_id = ?")->execute([$id]);
+            foreach ($old_cash_day_ids as $od) { if ($od) recomputeCashDayTotals($pdo, (int)$od); }
+            $old_bank_tx = $pdo->prepare("SELECT id, bank_account_id, amount, transaction_type FROM bank_transactions WHERE reference_type = 'sale' AND reference_id = ?");
+            $old_bank_tx->execute([$id]);
+            foreach ($old_bank_tx->fetchAll(PDO::FETCH_ASSOC) as $obt) {
+                $sign = ($obt['transaction_type'] === 'deposit') ? -1 : 1;
+                $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$sign * (float)$obt['amount'], (int)$obt['bank_account_id']]);
+                $pdo->prepare("DELETE FROM bank_transactions WHERE id = ?")->execute([(int)$obt['id']]);
+            }
+
+            // 2) Record the amount paid at the time of sale ONCE. Later customer receipts linked to this
+            //    invoice are already in the cash/bank book under their own voucher, so exclude them.
+            $paid_at_sale = max(0.0, $paid_amount - $linked_receipts);
+            if ($paid_at_sale > 0) {
+                $book_desc = "Sale Invoice #{$old_inv['invoice_no']} - {$customer_name} (Edited)";
                 $user_id_book = $_SESSION['user_id'] ?? 1;
                 if ($payment_method === 'Cash') {
                     if ($cash_account_id) {
-                        $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$paid_amount, $cash_account_id]);
+                        $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$paid_at_sale, $cash_account_id]);
                     }
-                    recordCashInflow($pdo, $invoice_date, $paid_amount, $book_desc, 'sale', $id, $user_id_book);
+                    recordCashInflow($pdo, $invoice_date, $paid_at_sale, $book_desc, 'sale', $id, $user_id_book);
                 } elseif ($payment_method === 'Bank' && $bank_account_id) {
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$paid_amount, $bank_account_id]);
-                    recordBankInflow($pdo, $invoice_date, $paid_amount, $book_desc, 'sale', $id, $user_id_book, $bank_account_id);
+                    // recordBankInflow() updates bank_accounts.current_balance itself (was double-counted)
+                    recordBankInflow($pdo, $invoice_date, $paid_at_sale, $book_desc, 'sale', $id, $user_id_book, $bank_account_id);
                 }
             }
 
@@ -455,11 +525,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             if ($db_connected && $pdo) {
                 $credit_amount = ($balance_due > 0) ? $balance_due : (($payment_method === 'Credit') ? $grand_total : 0);
                 $stmt_chk_u = $pdo->prepare("SELECT id FROM udhaar_book WHERE invoice_id = ? OR invoice_no = ?");
-                $stmt_chk_u->execute([$id, $invoice['invoice_no']]);
+                $stmt_chk_u->execute([$id, $old_inv['invoice_no']]);
                 $existing_u_id = $stmt_chk_u->fetchColumn();
 
                 if ($credit_amount > 0 && ($payment_method === 'Credit' || $balance_due > 0)) {
-                    $desc = "Sales Invoice #{$invoice['invoice_no']}";
+                    $desc = "Sales Invoice #{$old_inv['invoice_no']}";
                     if ($paid_amount > 0) {
                         $desc .= " (Total: Rs. " . number_format($grand_total, 2) . ", Paid: Rs. " . number_format($paid_amount, 2) . ", Due: Rs. " . number_format($balance_due, 2) . ")";
                     } else {
@@ -471,10 +541,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
                     if ($existing_u_id) {
                         $stmt_u = $pdo->prepare("UPDATE udhaar_book SET party_name = ?, invoice_no = ?, invoice_id = ?, amount = ?, type = 'Given', credit_date = ?, description = ? WHERE id = ?");
-                        $stmt_u->execute([$customer_name, $invoice['invoice_no'], $id, $credit_amount, $invoice_date, $desc, $existing_u_id]);
+                        $stmt_u->execute([$customer_name, $old_inv['invoice_no'], $id, $credit_amount, $invoice_date, $desc, $existing_u_id]);
                     } else {
                         $stmt_u = $pdo->prepare("INSERT INTO udhaar_book (party_name, invoice_no, invoice_id, amount, type, credit_date, description) VALUES (?, ?, ?, ?, 'Given', ?, ?)");
-                        $stmt_u->execute([$customer_name, $invoice['invoice_no'], $id, $credit_amount, $invoice_date, $desc]);
+                        $stmt_u->execute([$customer_name, $old_inv['invoice_no'], $id, $credit_amount, $invoice_date, $desc]);
                     }
                 } else {
                     if ($existing_u_id) {

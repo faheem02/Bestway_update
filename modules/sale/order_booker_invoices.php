@@ -725,6 +725,18 @@ $(document).ready(function(){
                     '<span class="badge badge-danger">-' + item.returned_qty + ' returned</span>' +
                     '<div class="small font-weight-bold text-success">Net: ' + item.net_qty + '</div>';
         }
+        if (item.cost_missing) {
+          // Batch cost was not recorded for this (older) sale line — do not show a fake profit
+          var tr = '<tr>' +
+            '<td><strong>' + item.product_name + '</strong></td>' +
+            '<td class="text-center">' + qtyHtml + '</td>' +
+            '<td class="text-right">PKR ' + parseFloat(item.sale_price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+            '<td class="text-right font-weight-bold">PKR ' + parseFloat(item.sale_subtotal).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
+            '<td class="text-right text-warning" colspan="4">Cost missing</td>' +
+            '</tr>';
+          $tbody.append(tr);
+          return;
+        }
         var tr = '<tr>' +
           '<td><strong>' + item.product_name + '</strong></td>' +
           '<td class="text-center">' + qtyHtml + '</td>' +
@@ -748,6 +760,12 @@ $(document).ready(function(){
         '<td class="text-right ' + netProfitClass + ' font-weight-bold">PKR ' + parseFloat(res.net_profit).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + '</td>' +
         '<td class="text-center"><span class="badge ' + netBadgeClass + '">' + res.margin_pct + '%</span></td>' +
         '</tr>';
+
+      if (res.cost_missing_amount > 0) {
+        tfootHtml += '<tr class="text-warning small">' +
+          '<td colspan="8" class="text-right">Cost missing for PKR ' + parseFloat(res.cost_missing_amount).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) + ' of this invoice (older sale) — excluded from profit.</td>' +
+          '</tr>';
+      }
 
       if (res.total_returned > 0) {
         tfootHtml += '<tr class="text-danger small bg-light">' +

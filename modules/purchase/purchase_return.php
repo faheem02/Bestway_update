@@ -68,19 +68,22 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
                     }
                 }
 
-                // Revert Supplier Balance (Add back the deducted return amount)
                 $sup_id = intval($ret_data['supplier_id']);
                 $ret_amt = floatval($ret_data['total_amount']);
-                if ($sup_id > 0 && $ret_amt > 0) {
-                    $pdo->prepare("UPDATE suppliers SET current_balance = current_balance + ? WHERE id = ?")->execute([$ret_amt, $sup_id]);
-                }
 
-                // Remove from ledgers
-                $pdo->prepare("DELETE FROM supplier_ledgers WHERE reference_no = ? AND supplier_id = ?")->execute([$ret_data['return_no'], $sup_id]);
+                // Undo the refund money: cash/bank book entries (bank balance restored there) and cash account
+                reverseReturnRefund($pdo, $del_id, 'purchase_return');
+                if (($ret_data['payment_method'] ?? '') === 'Cash Refund' && !empty($ret_data['cash_account_id'])) {
+                    $pdo->prepare("UPDATE cash_accounts SET balance = balance - ? WHERE id = ?")->execute([$ret_amt, (int)$ret_data['cash_account_id']]);
+                }
 
                 // Delete items & return
                 $pdo->prepare("DELETE FROM purchase_return_items WHERE purchase_return_id = ?")->execute([$del_id]);
                 $pdo->prepare("DELETE FROM purchase_returns WHERE id = ?")->execute([$del_id]);
+
+                // Rebuild the supplier ledger/balance from purchases, payments and remaining returns.
+                // (Previously the balance was increased even when the return had been a cash refund.)
+                if ($sup_id > 0) syncSupplierLedger($pdo, $sup_id);
 
                 $pdo->commit();
                 $message = "Purchase Return #{$ret_data['return_no']} cancelled successfully and stock restored.";
@@ -130,13 +133,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                     $unit_price = floatval($ret_data['purchase_price'] ?? $ret_data['price'] ?? 0);
                     $condition = trim($ret_data['condition'] ?? 'Good');
                     $purchase_item_id = intval($ret_data['purchase_item_id'] ?? $pi_id);
+                    // Debit note at the rate actually billed (net of supplier discount), not gross TP
+                    $unit_price = purchaseReturnUnitPrice($pdo, $purchase_item_id, $unit_price);
 
                     if ($ret_qty > 0) {
                         if ($max_qty > 0 && $ret_qty > $max_qty) {
                             throw new Exception("Error: Return quantity ({$ret_qty}) for product '{$pname}' cannot exceed purchased quantity ({$max_qty}).");
                         }
 
-                        $line_total = $ret_qty * $unit_price;
+                        $line_total = round($ret_qty * $unit_price, 2);
                         $total_return_amount += $line_total;
 
                         $validated_return_items[] = [
@@ -163,7 +168,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
                     INSERT INTO purchase_returns (
                         return_no, purchase_id, supplier_id, return_date, total_amount, reason,
                         status, created_by, payment_method, cash_account_id, bank_account_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'Adjusted', ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'Completed', ?, ?, ?, ?)
                 ");
                 $stmt_pr->execute([
                     $return_no, $purchase_id, $supplier_id, $return_date, $total_return_amount,
@@ -198,34 +203,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_return'])) {
 
                 // 3. Financial Settlement
                 if ($refund_type === 'Adjust / Deduct Supplier Balance' || $refund_type === 'Adjust / Deduct Customer Balance') {
-                    // Reduce payable to supplier
-                    $stmt_sbal = $pdo->prepare("SELECT current_balance FROM suppliers WHERE id = ? FOR UPDATE");
-                    $stmt_sbal->execute([$supplier_id]);
-                    $current_sup_bal = floatval($stmt_sbal->fetchColumn() ?? 0);
-                    $new_sup_bal = max(0, $current_sup_bal - $total_return_amount);
-
-                    $pdo->prepare("UPDATE suppliers SET current_balance = ? WHERE id = ?")->execute([$new_sup_bal, $supplier_id]);
-
-                    // Debit Supplier account in ledger
-                    $stmt_sledger = $pdo->prepare("
-                        INSERT INTO supplier_ledgers (
-                            supplier_id, transaction_date, transaction_type,
-                            reference_no, debit_amount, credit_amount,
-                            running_balance, description
-                        ) VALUES (?, ?, 'Purchase Return', ?, ?, 0.00, ?, ?)
-                    ");
-                    $stmt_sledger->execute([
-                        $supplier_id, $return_date, $return_no,
-                        $total_return_amount, $new_sup_bal,
-                        "Debit Note / Return #{$return_no} | Reason: {$reason}"
-                    ]);
+                    // Reduce payable to supplier: syncSupplierLedger() now includes purchase returns,
+                    // so rebuild the ledger instead of writing a one-off row that the next rebuild erased.
+                    syncSupplierLedger($pdo, $supplier_id);
                 } elseif ($refund_type === 'Cash Refund' && $cash_account_id) {
                     // Cash received from supplier into cash account
                     $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
-                } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
-                    // Bank refund received from supplier into bank account
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
                 }
+                // Cash / bank refund received from the supplier goes into the cash book / bank book
+                // (bank balance is updated there; it was updated directly before, without a book entry)
+                recordReturnRefund($pdo, $return_id, $return_date, $refund_type, $total_return_amount, $bank_account_id, "Purchase Return #{$return_no} refund", 'purchase_return');
 
                 $pdo->commit();
                 $message = "Purchase Return #{$return_no} kamiyabi se save ho gaya aur warehouse stock se items deduct kar diye gaye hain! <a href='print_purchase_return.php?id={$return_id}' target='_blank' class='fw-bold text-dark text-decoration-underline ms-2'><i class='fa-solid fa-print'></i> Print Debit Note</a>";

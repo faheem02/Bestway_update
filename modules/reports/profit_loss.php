@@ -38,7 +38,9 @@ $stmt_ret = $conn->prepare("
         sri.product_id,
         COALESCE(SUM(sri.quantity), 0) AS returned_qty,
         COALESCE(SUM(sri.total_price), 0) AS returned_sales,
-        COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0) AS returned_cost
+        -- cost of the returned units = batch cost stored on the original invoice line (0 if unknown)
+        COALESCE(SUM(sri.quantity * COALESCE((SELECT MAX(x.cost_price) FROM sale_items x
+            WHERE x.invoice_id = COALESCE(sr.invoice_id, sr.sale_id) AND x.product_id = sri.product_id AND x.cost_price > 0), 0)), 0) AS returned_cost
     FROM sale_returns sr
     JOIN sale_return_items sri ON sri.return_id = sr.id
     LEFT JOIN products p ON p.id = sri.product_id
@@ -66,23 +68,31 @@ if ($stmt_ret) {
 // True Net Sales = Invoiced Sales minus Sales Returns
 $net_sales = max(0.0, $invoiced_sales - $sales_returns);
 
-// 2. Fetch Cost of Goods Sold (COGS) from sold items joined with product purchase price
-// Using cross-database join if possible, or querying product prices
+// 2. Cost of Goods Sold (COGS) — BATCH-WISE COSTING (Bug #1)
+// Each sale line stores cost_price = purchase cost of the batch it was sold from,
+// captured at the moment of sale. The latest product-master cost is NOT used, and
+// no cost is ever guessed: lines without a recorded cost are reported as "cost missing".
+ensureSaleItemCostColumn($pdo);
+
 $cogs = 0.0;
 $product_profits = [];
+$cost_missing_products = [];   // products whose sold lines have no recorded batch cost
+$cost_missing_revenue  = 0.0;  // revenue whose cost is unknown (profit overstated by its cost)
+$cost_partial_products = [];   // products where only some lines have a recorded cost
+$sold_pids_in_period   = [];
 
-$sold_sql = "SELECT 
+$sold_sql = "SELECT
     si.product_id,
-    si.item_name,
+    MAX(si.item_name) as item_name,
     SUM(si.quantity) as total_qty,
     SUM(si.total_amount) as total_revenue,
-    COALESCE(p.purchase_price, 0) as cost_price,
-    COALESCE(p.trade_price, 0) as trade_price
+    SUM(CASE WHEN si.cost_price > 0 THEN si.quantity * si.cost_price ELSE 0 END) as known_cost,
+    SUM(CASE WHEN si.cost_price > 0 THEN si.quantity ELSE 0 END) as known_qty,
+    SUM(CASE WHEN si.cost_price > 0 THEN 0 ELSE si.total_amount END) as uncosted_revenue
 FROM sales_invoices inv
 JOIN sale_items si ON inv.id = si.invoice_id
-LEFT JOIN products p ON si.product_id = p.id
 WHERE inv.invoice_date BETWEEN ? AND ?
-GROUP BY si.product_id, si.item_name, p.purchase_price, p.trade_price
+GROUP BY si.product_id
 ORDER BY total_revenue DESC";
 
 $stmt_items = $conn->prepare($sold_sql);
@@ -98,16 +108,25 @@ if ($stmt_items) {
         // Net quantity and net revenue for this product after returns
         $qty = max(0.0, (float)$row['total_qty'] - $ret_q);
         $rev = max(0.0, (float)$row['total_revenue'] - $ret_s);
-        $cost_unit = (float)$row['cost_price'];
-        
-        // If cost price not recorded, fallback to trade price * 0.85
-        if ($cost_unit <= 0 && (float)$row['trade_price'] > 0) {
-            $cost_unit = (float)$row['trade_price'] * 0.85;
-        } elseif ($cost_unit <= 0 && $qty > 0) {
-            $cost_unit = ($rev / $qty) * 0.85;
+
+        $known_qty  = (float)$row['known_qty'];
+        $sold_qty   = (float)$row['total_qty'];
+        $cost_known = ($known_qty > 0);
+
+        // Weighted unit cost of the batches this product was actually sold from in the period
+        $cost_unit = $cost_known ? ((float)$row['known_cost'] / $known_qty) : 0.0;
+
+        if (!$cost_known) {
+            $cost_missing_products[] = $row['item_name'];
+            $cost_missing_revenue += (float)$row['total_revenue'];
+        } elseif ($known_qty < $sold_qty) {
+            $cost_partial_products[] = $row['item_name'];
+            $cost_missing_revenue += (float)$row['uncosted_revenue'];
         }
 
-        $line_cost = $qty * $cost_unit;
+        // Cost only the quantity that has a recorded batch cost (never estimate the rest)
+        $costed_net_qty = $cost_known ? max(0.0, min($qty, $known_qty)) : 0.0;
+        $line_cost = $costed_net_qty * $cost_unit;
         $line_profit = $rev - $line_cost;
         $cogs += $line_cost;
 
@@ -115,12 +134,25 @@ if ($stmt_items) {
         $row['total_revenue'] = $rev;
         $row['returned_qty'] = $ret_q;
         $row['returned_revenue'] = $ret_s;
+        $row['cost_known'] = $cost_known;
         $row['calculated_cost'] = $line_cost;
         $row['calculated_profit'] = $line_profit;
         $row['profit_margin'] = ($rev > 0) ? ($line_profit / $rev * 100) : 0;
         $product_profits[] = $row;
+        $sold_pids_in_period[$pid] = true;
     }
     $stmt_items->close();
+}
+
+// Returns in this period of products NOT sold in this period (sold earlier): their value was
+// deducted from net sales, but the cost of the goods coming back was never taken off COGS.
+foreach ($returns_by_product as $r_pid => $r_info) {
+    if (isset($sold_pids_in_period[$r_pid])) continue; // already netted in the product loop above
+    if ((float)$r_info['cost'] > 0) {
+        $cogs -= (float)$r_info['cost'];
+    } elseif ((float)$r_info['sales'] > 0) {
+        $cost_missing_products[] = 'Return of product #' . $r_pid;
+    }
 }
 
 $gross_profit = $net_sales - $cogs;
@@ -132,14 +164,16 @@ $total_expenses = 0.0;
 
 if ($pdo) {
     try {
-        $stmt_exp = $pdo->prepare("SELECT 
-            COALESCE(c.name, 'General Operations') as category_name,
+        // Expense categories live in expense_categories (joining `categories` showed product
+        // categories, e.g. "Flat Rent" appeared as "Cream")
+        $stmt_exp = $pdo->prepare("SELECT
+            COALESCE(ec.name, NULLIF(e.expense_category, ''), 'General Operations') as category_name,
             COUNT(e.id) as voucher_count,
             COALESCE(SUM(e.amount), 0) as total_amount
         FROM expenses e
-        LEFT JOIN categories c ON e.category_id = c.id
+        LEFT JOIN expense_categories ec ON e.category_id = ec.id
         WHERE e.expense_date BETWEEN :start_date AND :end_date
-        GROUP BY COALESCE(c.name, 'General Operations')
+        GROUP BY COALESCE(ec.name, NULLIF(e.expense_category, ''), 'General Operations')
         ORDER BY total_amount DESC");
         $stmt_exp->execute([':start_date' => $start_date, ':end_date' => $end_date]);
         $expenses_by_cat = $stmt_exp->fetchAll(PDO::FETCH_ASSOC);
@@ -221,6 +255,22 @@ $report_orientation = "portrait";
         </div>
     </div>
 
+
+    <?php if (!empty($cost_missing_products) || !empty($cost_partial_products)): ?>
+    <!-- Batch cost missing warning (Bug #1): profit below excludes the cost of these sales -->
+    <div class="alert alert-warning small">
+        <strong><i class="fa-solid fa-triangle-exclamation me-1"></i>Cost missing:</strong>
+        Rs. <?php echo number_format($cost_missing_revenue, 2); ?> of sales in this period have no recorded batch purchase cost
+        (sales saved before batch-wise costing). Their cost is NOT included in COGS, so Gross and Net Profit below are overstated by that cost.
+        <?php
+            $cm_list = array_merge($cost_missing_products, $cost_partial_products);
+            $cm_show = array_slice($cm_list, 0, 15);
+        ?>
+        <div class="mt-1 text-muted">
+            Products (<?php echo count($cm_list); ?>): <?php echo htmlspecialchars(implode(', ', $cm_show)); ?><?php echo count($cm_list) > 15 ? ' …' : ''; ?>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <!-- Formal Statement of Profit & Loss Table -->
     <div class="card border-0 shadow-sm mb-4">
@@ -361,7 +411,7 @@ $report_orientation = "portrait";
                                         <td class="fw-semibold text-dark"><?php echo htmlspecialchars($p['item_name']); ?></td>
                                         <td class="text-center"><?php echo number_format($p['total_qty']); ?></td>
                                         <td class="text-end">Rs. <?php echo number_format($p['total_revenue'], 0); ?></td>
-                                        <td class="text-end text-muted">Rs. <?php echo number_format($p['calculated_cost'], 0); ?></td>
+                                        <td class="text-end text-muted"><?php echo !empty($p['cost_known']) ? 'Rs. ' . number_format($p['calculated_cost'], 0) : '<span class="text-warning">Cost missing</span>'; ?></td>
                                         <td class="text-end fw-bold text-success">Rs. <?php echo number_format($p['calculated_profit'], 0); ?></td>
                                         <td class="text-center">
                                             <span class="badge <?php echo ($p['profit_margin'] > 10) ? 'bg-success' : 'bg-secondary'; ?>">

@@ -137,18 +137,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_return'])) {
                 $old_cash_id = !empty($return_data['cash_account_id']) ? intval($return_data['cash_account_id']) : 0;
                 $old_bank_id = !empty($return_data['bank_account_id']) ? intval($return_data['bank_account_id']) : 0;
 
+                // Undo the old refund money: cash/bank book entries (bank balance restored there)
+                reverseReturnRefund($pdo, $id, 'purchase_return');
                 if ($old_ref_type === 'Cash Refund' && $old_cash_id > 0) {
                     $pdo->prepare("UPDATE cash_accounts SET balance = balance - ? WHERE id = ?")->execute([$old_total, $old_cash_id]);
-                } elseif ($old_ref_type === 'Bank Refund' && $old_bank_id > 0) {
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance - ? WHERE id = ?")->execute([$old_total, $old_bank_id]);
-                } else {
-                    // Revert supplier balance
-                    if ($supplier_id > 0 && $old_total > 0) {
-                        $pdo->prepare("UPDATE suppliers SET current_balance = current_balance + ? WHERE id = ?")->execute([$old_total, $supplier_id]);
-                    }
-                    // Delete old ledger row
-                    $pdo->prepare("DELETE FROM supplier_ledgers WHERE reference_no = ? AND supplier_id = ?")->execute([$return_data['return_no'], $supplier_id]);
                 }
+                // Supplier balance/ledger is rebuilt by syncSupplierLedger() after the header update below
 
                 // 3. Process new updated items
                 $validated_return_items = [];
@@ -164,12 +158,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_return'])) {
                     $condition  = trim($ret_data['condition'] ?? 'Good');
                     $purchase_item_id = intval($ret_data['purchase_item_id'] ?? $pi_id);
 
+                    // Debit note at the rate actually billed (net of supplier discount), not gross TP
+                    $unit_price = purchaseReturnUnitPrice($pdo, $purchase_item_id, $unit_price);
+
                     if ($ret_qty > 0) {
                         if ($max_qty > 0 && $ret_qty > $max_qty) {
                             throw new Exception("Error: Return quantity ({$ret_qty}) for product '{$pname}' cannot exceed purchased returnable quantity ({$max_qty}).");
                         }
 
-                        $line_total = $ret_qty * $unit_price;
+                        $line_total = round($ret_qty * $unit_price, 2);
                         $total_return_amount += $line_total;
 
                         $validated_return_items[] = [
@@ -215,32 +212,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_return'])) {
                     }
                 }
 
-                // 5. Apply new financial settlement
-                if ($refund_type === 'Adjust / Deduct Supplier Balance' || $refund_type === 'Adjust / Deduct Customer Balance') {
-                    $stmt_sbal = $pdo->prepare("SELECT current_balance FROM suppliers WHERE id = ? FOR UPDATE");
-                    $stmt_sbal->execute([$supplier_id]);
-                    $current_sup_bal = floatval($stmt_sbal->fetchColumn() ?? 0);
-                    $new_sup_bal = max(0, $current_sup_bal - $total_return_amount);
-
-                    $pdo->prepare("UPDATE suppliers SET current_balance = ? WHERE id = ?")->execute([$new_sup_bal, $supplier_id]);
-
-                    $stmt_sledger = $pdo->prepare("
-                        INSERT INTO supplier_ledgers (
-                            supplier_id, transaction_date, transaction_type,
-                            reference_no, debit_amount, credit_amount,
-                            running_balance, description
-                        ) VALUES (?, ?, 'Purchase Return', ?, ?, 0.00, ?, ?)
-                    ");
-                    $stmt_sledger->execute([
-                        $supplier_id, $return_date, $return_data['return_no'],
-                        $total_return_amount, $new_sup_bal,
-                        "Debit Note / Return #{$return_data['return_no']} (Updated) | Reason: {$reason}"
-                    ]);
-                } elseif ($refund_type === 'Cash Refund' && $cash_account_id) {
+                // 5. Apply new financial settlement (supplier balance: see syncSupplierLedger below)
+                if ($refund_type === 'Cash Refund' && $cash_account_id) {
                     $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")->execute([$total_return_amount, $cash_account_id]);
-                } elseif ($refund_type === 'Bank Refund' && $bank_account_id) {
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$total_return_amount, $bank_account_id]);
                 }
+                // Cash / bank refund from the supplier into the cash book / bank book (bank balance updated there)
+                recordReturnRefund($pdo, $id, $return_date, $refund_type, $total_return_amount, $bank_account_id, "Purchase Return #{$return_data['return_no']} refund (edited)", 'purchase_return');
 
                 // 6. Update purchase_returns header record
                 $stmt_upd_pr = $pdo->prepare("
@@ -252,6 +229,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_return'])) {
                     $return_date, $total_return_amount, $reason, $refund_type,
                     $cash_account_id, $bank_account_id, $id
                 ]);
+
+                // Rebuild supplier ledger/balance (includes this return if it is a balance adjustment)
+                if ($supplier_id > 0) syncSupplierLedger($pdo, $supplier_id);
 
                 $pdo->commit();
                 $message = "Purchase Return #{$return_data['return_no']} kamiyabi se update ho gaya! <a href='print_purchase_return.php?id={$id}' target='_blank' class='fw-bold text-dark text-decoration-underline ms-2'><i class='fa-solid fa-print'></i> Print Debit Note</a>";

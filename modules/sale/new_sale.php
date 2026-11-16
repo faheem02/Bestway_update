@@ -406,6 +406,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         try {
             // STEP 1: VALIDATE PRODUCTS & STOCK FROM SYSTEM (Zero-trust, Pcs based)
             $validated_items = [];
+            $requested_by_pid = []; // total qty asked per product across ALL rows (same product can be on several rows)
             $subtotal = 0;
             $total_discount_cut = 0;
 
@@ -448,6 +449,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 }
 
                 // Check 2: Does requested qty exceed available stock?
+                $requested_by_pid[$pid] = ($requested_by_pid[$pid] ?? 0) + $qty;
+                if ($requested_by_pid[$pid] > $available_stock) {
+                    throw new Exception("Error: Total quantity of '{$p_name}' on this invoice is {$requested_by_pid[$pid]}, but available stock is only {$available_stock}.");
+                }
                 if ($qty > $available_stock) {
                     throw new Exception("Error: Available stock for '{$p_name}' is only {$available_stock} Pcs, but entered quantity is {$qty}.");
                 }
@@ -462,7 +467,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $disc = max(0.0, min(100.0, floatval($prod_row['default_discount'] ?? 0)));
 
                 $gross = $qty * $tp;
-                $net   = $gross - ($gross * ($disc / 100));
+                // Rounded per line exactly as stored in sale_items, so the invoice total = sum of its lines
+                $net   = round($gross - ($gross * ($disc / 100)), 2);
 
                 $subtotal += $gross;
                 $total_discount_cut += ($gross - $net);
@@ -487,7 +493,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             $items_net = $subtotal - $total_discount_cut;
             $order_discount_percent = isAdmin() ? floatval($_POST['order_discount_percent'] ?? 0) : 0.0;
-            $order_discount_amount  = $items_net * ($order_discount_percent / 100);
+            $order_discount_amount  = round($items_net * ($order_discount_percent / 100), 2);
             $total_discount_cut    += $order_discount_amount;
 
             $shipping_cost    = 0.00;
@@ -499,6 +505,10 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $net_payable      = $grand_total;
             $paid_amount      = floatval($_POST['paid_amount'] ?? 0);
             $balance_due      = max(0, $grand_total - $paid_amount);
+
+            // Batch-wise costing: make sure sale_items.cost_price exists (must run before the transaction)
+            ensureSaleItemCostColumn($pdo);
+            ensureUdhaarTypeEnum($pdo); // allow 'Given' in Credit Book (was stored blank)
 
             // STEP 2: START TRANSACTIONS
             $conn->begin_transaction();
@@ -520,15 +530,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             // 2. Insert items into sale_items AND DEDUCT STOCK (Specifically for the chosen batch)
             $stmt_si = $pdo->prepare("
                 INSERT INTO sale_items 
-                (invoice_id, sale_id, product_id, item_name, batch_id, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price) 
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (invoice_id, sale_id, product_id, item_name, batch_id, batch_no, expiry_date, quantity, unit_price, sale_price, trade_price, discount_percent, extra_discount_percent, total_amount, total_price, cost_price)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
 
             $stmt_deduct_stock = $pdo->prepare("UPDATE products SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
             $stmt_deduct_batch_id = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
             $stmt_deduct_batch_no = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE product_id = ? AND batch_no = ?");
             $stmt_get_batch_info = $pdo->prepare("SELECT id, batch_no, expiry_date FROM product_batches WHERE id = ? LIMIT 1");
-            $stmt_batches_fifo = $pdo->prepare("SELECT id, batch_no, expiry_date, current_stock FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY expiry_date ASC, id ASC");
+            $stmt_batches_fifo = $pdo->prepare("SELECT id, batch_no, expiry_date, current_stock, purchase_price FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY expiry_date ASC, id ASC");
 
             foreach ($validated_items as $v_item) {
                 $pid   = $v_item['product_id'];
@@ -541,9 +551,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $b_id  = $v_item['batch_id'] ?? 0;
                 $b_no  = $v_item['batch_no'] ?? '';
                 $b_exp = $v_item['expiry_date'] ?? null;
+                $unit_cost = null; // purchase cost of the batch this line is sold from (Bug #1)
 
                 // 1. Deduct from selected batch if provided
                 if ($b_id > 0) {
+                    $unit_cost = batchUnitCost($pdo, $pid, $b_id);
                     $stmt_deduct_batch_id->execute([$qty, $b_id]);
                     if (empty($b_exp) || empty($b_no)) {
                         $stmt_get_batch_info->execute([$b_id]);
@@ -554,12 +566,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                         }
                     }
                 } elseif (!empty($b_no) && $b_no !== 'DEFAULT') {
+                    $unit_cost = batchUnitCost($pdo, $pid, 0, $b_no);
                     $stmt_deduct_batch_no->execute([$qty, $pid, $b_no]);
                 } else {
                     // Fallback to FIFO if no specific batch was chosen
                     $stmt_batches_fifo->execute([$pid]);
                     $batches = $stmt_batches_fifo->fetchAll(PDO::FETCH_ASSOC);
                     $rem_qty = $qty;
+                    $fifo_cost_total = 0.0; // sum of qty x batch cost over batches with a known cost
+                    $fifo_cost_qty   = 0;
                     if (!empty($batches)) {
                         $b_no = $batches[0]['batch_no'] ?? 'DEFAULT';
                         $b_exp = !empty($batches[0]['expiry_date']) ? $batches[0]['expiry_date'] : null;
@@ -569,8 +584,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                             $deduct = min($rem_qty, $b_stock);
                             $stmt_deduct_batch_id->execute([$deduct, $b['id']]);
                             $rem_qty -= $deduct;
+                            if ($deduct > 0 && (float)$b['purchase_price'] > 0) {
+                                $fifo_cost_total += $deduct * (float)$b['purchase_price'];
+                                $fifo_cost_qty   += $deduct;
+                            }
                         }
                     }
+                    // Weighted cost of the batches actually used (e.g. 3 from A + 2 from B)
+                    $unit_cost = ($fifo_cost_qty > 0) ? round($fifo_cost_total / $fifo_cost_qty, 2) : null;
                 }
 
                 if (empty($b_no)) {
@@ -592,7 +613,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     $disc,
                     $xdisc,
                     $l_net,
-                    $l_net
+                    $l_net,
+                    $unit_cost
                 ]);
 
                 // Deduct from overall product stock
@@ -609,7 +631,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     }
                     recordCashInflow($pdo, $invoice_date, $paid_amount, $book_desc, 'sale', $invoice_id, $user_id_book);
                 } elseif ($payment_method === 'Bank' && $bank_account_id) {
-                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")->execute([$paid_amount, $bank_account_id]);
+                    // recordBankInflow() already adds to bank_accounts.current_balance (was double-counted)
                     recordBankInflow($pdo, $invoice_date, $paid_amount, $book_desc, 'sale', $invoice_id, $user_id_book, $bank_account_id);
                 }
             }

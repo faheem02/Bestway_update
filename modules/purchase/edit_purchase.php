@@ -56,6 +56,37 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
 
     $posted_items = $_POST['items'] ?? [];
 
+    // Server-side recalculation of every line and of the bill totals — same formula as Add Purchase
+    // (gross = qty x rate, disc = gross x disc%, GST on (gross - disc); bonus = free units, NOT money).
+    // Posted totals were trusted before, and the edit form treated "Bonus (Pcs)" as a % discount.
+    if (is_array($posted_items)) {
+        $calc_subtotal = 0.0;
+        $calc_tax      = 0.0;
+        foreach ($posted_items as $k => $itm) {
+            $q_  = max(0, intval($itm['quantity'] ?? 0));
+            $b_  = max(0, intval($itm['bonus_quantity'] ?? 0));
+            $c_  = floatval($itm['purchase_price'] ?? 0);
+            $dp_ = floatval($itm['discount_percent'] ?? 0);
+            $tp_ = floatval($itm['tax_percent'] ?? 0);
+            $g_  = $q_ * $c_;
+            $da_ = round($g_ * ($dp_ / 100), 2);
+            $nb_ = max(0, round($g_ - $da_, 2));
+            $ta_ = round($nb_ * ($tp_ / 100), 2);
+            $rt_ = max(0, round($nb_ + $ta_, 2));
+            $posted_items[$k]['discount_amount'] = $da_;
+            $posted_items[$k]['tax_amount']      = $ta_;
+            $posted_items[$k]['total_price']     = $rt_;
+            if (intval($itm['product_id'] ?? 0) > 0 && ($q_ + $b_) > 0) {
+                $calc_subtotal += $rt_;
+                $calc_tax      += $ta_;
+            }
+        }
+        $subtotal        = round($calc_subtotal, 2);
+        $tax_amount      = round($calc_tax, 2);
+        $discount_amount = max(0, min($discount_amount, $subtotal));
+        $grand_total     = round(max(0, $subtotal - $discount_amount + $freight_charges), 2);
+    }
+
     if ($supplier_id <= 0) {
         $message = "Please select a Supplier.";
         $msg_type = "danger";
@@ -72,8 +103,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                 $stmt_prev->execute([$purchase_id]);
                 $prev_items = $stmt_prev->fetchAll();
 
-                $stmt_revert_stock = $pdo->prepare("UPDATE products SET current_stock = GREATEST(0, current_stock - ?) WHERE id = ?");
-                $stmt_revert_batch = $pdo->prepare("UPDATE product_batches SET current_stock = GREATEST(0, current_stock - ?) WHERE product_id = ? AND batch_no = ?");
+                // No GREATEST(0, ...) here: if part of this bill was already sold, clamping the
+                // reversal at 0 and then re-adding the full qty inflated stock (bought 10, sold 8,
+                // edit unchanged -> stock became 10 instead of 2). The re-add below restores it.
+                $stmt_revert_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock - ? WHERE id = ?");
+                $stmt_revert_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock - ? WHERE product_id = ? AND batch_no = ?");
 
                 foreach ($prev_items as $pit) {
                     $tot_prev = intval($pit['quantity']) + intval($pit['bonus_quantity']);
@@ -173,8 +207,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     $bill_disc_ratio = ($subtotal > 0 && $discount_amount > 0) ? min(1, $discount_amount / $subtotal) : 0;
                     $row_net_after_bill_disc = max(0, $row_total * (1 - $bill_disc_ratio));
 
-                    // Net effective unit cost after BOTH discounts and GST
-                    $net_unit_cost = ($raw_qty > 0) ? ($row_net_after_bill_disc / $raw_qty) : $p_cost;
+                    // Net effective unit cost after BOTH discounts and GST, spread over total received
+                    // qty INCLUDING bonus — same rule as Add Purchase (was qty only -> higher cost after edit)
+                    $net_unit_cost = ($total_stock > 0) ? ($row_net_after_bill_disc / $total_stock) : $p_cost;
 
                     if ($pid > 0 && ($final_qty > 0 || $final_bonus > 0)) {
                         $impacted_edit_pids[$pid] = true;
@@ -205,13 +240,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['update_purcha
                     }
                 }
 
-                // Sync products.current_stock with product_batches
-                if (!empty($impacted_edit_pids)) {
-                    $sync_edit_stmt = $pdo->prepare("UPDATE products SET current_stock = (SELECT COALESCE(SUM(current_stock), 0) FROM product_batches WHERE product_id = ?) WHERE id = ?");
-                    foreach (array_keys($impacted_edit_pids) as $eip) {
-                        $sync_edit_stmt->execute([$eip, $eip]);
-                    }
-                }
+                // products.current_stock was reverted and re-added above. It is no longer overwritten
+                // with SUM(batch stock), which silently deleted units wherever batch stock had drifted.
 
                 // 6. Sync supplier ledgers (for both old and new supplier if changed)
                 if ($old_sup_id > 0) {
@@ -587,7 +617,9 @@ function calcEditRow(rowId) {
     // DiscAmt  = Gross × Disc%  / 100   ← trade discount, bill se minus
     // Total    = Gross - BonusAmt - DiscAmt
     const gross    = qty * cost;
-    const bonusAmt = parseFloat((gross * (bonusPct / 100)).toFixed(2));
+    // "Bonus (Pcs)" is free units (stock), not a money discount — same as Add Purchase.
+    // It used to be applied as a % and reduced the bill total.
+    const bonusAmt = 0;
     const dAmt     = parseFloat((gross * (discPct  / 100)).toFixed(2));
     const totalRed = parseFloat((bonusAmt + dAmt).toFixed(2));
     const netBefTax = Math.max(0, parseFloat((gross - totalRed).toFixed(2)));

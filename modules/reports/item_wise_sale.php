@@ -60,7 +60,12 @@ $summary = [
 // 2. Batch purchase price (if batch tracked)
 // 3. Product purchase_price (when lower than trade_price)
 // 4. Default wholesale cost (trade_price * 0.85, representing standard 15% wholesale distribution margin)
-$cost_unit_expr = "COALESCE(pi_cost.net_cost, pb.purchase_price, CASE WHEN p.purchase_price > 0 AND p.purchase_price < p.trade_price THEN p.purchase_price WHEN p.trade_price > 0 THEN p.trade_price * 0.85 ELSE p.purchase_price END, 0)";
+// Batch-wise costing: the cost of the batch each line was sold from, stored at sale time.
+// NULL = not recorded (older sale). Never estimated from other batches or a % of TP.
+ensureSaleItemCostColumn($pdo);
+$cost_unit_expr = "NULLIF(it.cost_price, 0)";
+$net_expr       = "COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)";
+$costed_net_expr = "CASE WHEN it.cost_price > 0 THEN {$net_expr} ELSE 0 END";
 
 $pi_cost_join = "LEFT JOIN (
     SELECT product_id, 
@@ -80,7 +85,9 @@ $summary_sql = "SELECT
     COALESCE(SUM(it.unit_price * it.quantity) - SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)), 0) AS total_discount,
     COALESCE(SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)), 0) AS total_net,
     COALESCE(SUM(it.quantity * {$cost_unit_expr}), 0) AS total_cost,
-    COALESCE(SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * {$cost_unit_expr}), 0) AS total_margin
+    COALESCE(SUM({$costed_net_expr}), 0) AS costed_net,
+    COALESCE(SUM({$net_expr}) - SUM({$costed_net_expr}), 0) AS uncosted_net,
+    COALESCE(SUM({$costed_net_expr}) - SUM(COALESCE(it.quantity * {$cost_unit_expr}, 0)), 0) AS total_margin
 FROM sale_items it
 JOIN sales_invoices si ON it.invoice_id = si.id
 LEFT JOIN products p ON p.id = it.product_id
@@ -107,11 +114,12 @@ $list_sql = "SELECT
     SUM(it.quantity) AS total_qty,
     SUM(COALESCE(it.bonus_quantity, 0)) AS total_bonus,
     ROUND(AVG(it.unit_price), 2) AS avg_unit_price,
-    ROUND(AVG({$cost_unit_expr}), 2) AS avg_cost_price,
+    ROUND(SUM(it.quantity * {$cost_unit_expr}) / NULLIF(SUM(CASE WHEN it.cost_price > 0 THEN it.quantity ELSE 0 END), 0), 2) AS avg_cost_price,
+    COALESCE(SUM({$costed_net_expr}), 0) AS costed_net,
     SUM(it.unit_price * it.quantity) AS gross_amount,
     SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) AS net_amount,
-    SUM(it.quantity * {$cost_unit_expr}) AS total_cost,
-    (SUM(COALESCE(it.total_price, it.total_amount, it.unit_price * it.quantity)) - SUM(it.quantity * {$cost_unit_expr})) AS margin_amount
+    COALESCE(SUM(it.quantity * {$cost_unit_expr}), 0) AS total_cost,
+    (SUM({$costed_net_expr}) - COALESCE(SUM(it.quantity * {$cost_unit_expr}), 0)) AS margin_amount
 FROM sale_items it
 JOIN sales_invoices si ON it.invoice_id = si.id
 LEFT JOIN products p ON p.id = it.product_id
@@ -167,7 +175,8 @@ $ret_sql = "
         COALESCE(p.name, 'Item') AS product_name,
         COALESCE(SUM(sri.quantity), 0) AS returned_qty,
         COALESCE(SUM(sri.total_price), 0) AS returned_amount,
-        COALESCE(SUM(sri.quantity * {$cost_unit_expr}), 0) AS returned_cost
+        COALESCE(SUM(sri.quantity * COALESCE((SELECT MAX(x.cost_price) FROM sale_items x WHERE x.invoice_id = si.id AND x.product_id = sri.product_id AND x.cost_price > 0), 0)), 0) AS returned_cost,
+        COALESCE(SUM(CASE WHEN (SELECT MAX(x.cost_price) FROM sale_items x WHERE x.invoice_id = si.id AND x.product_id = sri.product_id AND x.cost_price > 0) IS NOT NULL THEN sri.total_price ELSE 0 END), 0) AS returned_costed_amount
     FROM sale_returns sr
     JOIN sale_return_items sri ON (sri.return_id = sr.id OR sri.sale_return_id = sr.id)
     LEFT JOIN sales_invoices si ON (si.id = sr.sale_id OR (sr.sale_id IS NOT NULL AND si.id = sr.invoice_id))
@@ -191,6 +200,7 @@ $returns_by_product = [];
 $total_returned_qty = 0;
 $total_returned_amount = 0;
 $total_returned_cost = 0;
+$total_returned_costed_amount = 0; // returns whose original sale line has a batch cost
 
 foreach ($returns_raw as $rr) {
     $r_pid = (int)$rr['product_id'];
@@ -198,12 +208,14 @@ foreach ($returns_raw as $rr) {
         'qty'          => (float)$rr['returned_qty'],
         'amount'       => (float)$rr['returned_amount'],
         'cost'         => (float)$rr['returned_cost'],
+        'costed_amount'=> (float)$rr['returned_costed_amount'],
         'product_name' => $rr['product_name'],
         'product_code' => $rr['product_code'],
     ];
     $total_returned_qty    += (float)$rr['returned_qty'];
     $total_returned_amount += (float)$rr['returned_amount'];
     $total_returned_cost   += (float)$rr['returned_cost'];
+    $total_returned_costed_amount += (float)$rr['returned_costed_amount'];
 }
 
 // Adjust Summary Metrics with Returns (guaranteed non-negative)
@@ -214,7 +226,9 @@ $summary['total_returned_cost']   = $total_returned_cost;
 $summary['net_sold_qty']          = max(0.0, $summary['total_qty'] - $total_returned_qty);
 $summary['net_sales_amount']      = max(0.0, $summary['total_net'] - $total_returned_amount);
 $summary['net_cost_amount']       = max(0.0, $summary['total_cost'] - $total_returned_cost);
-$summary['net_margin_amount']     = $summary['net_sales_amount'] - $summary['net_cost_amount'];
+// Margin only over lines whose batch cost is recorded (older uncosted sales are excluded, not guessed)
+$summary['net_margin_amount']     = max(0.0, (float)($summary['costed_net'] ?? 0) - $total_returned_costed_amount) - $summary['net_cost_amount'];
+$summary['uncosted_net']          = (float)($summary['uncosted_net'] ?? 0);
 
 // Merge Sales & Returns per Product
 $final_items = [];
@@ -222,7 +236,7 @@ $final_items = [];
 foreach ($sales_items as $si) {
     $pid = (int)$si['product_id'];
 
-    $ret = $returns_by_product[$pid] ?? ['qty' => 0, 'amount' => 0, 'cost' => 0];
+    $ret = $returns_by_product[$pid] ?? ['qty' => 0, 'amount' => 0, 'cost' => 0, 'costed_amount' => 0];
     $sold_q  = (float)$si['total_qty'];
     $ret_q   = (float)$ret['qty'];
     $net_q   = max(0.0, $sold_q - $ret_q);
@@ -234,7 +248,8 @@ foreach ($sales_items as $si) {
 
     $ret_cost  = (float)$ret['cost'];
     $net_cost  = max(0.0, (float)$si['total_cost'] - $ret_cost);
-    $margin    = $net_amt - $net_cost;
+    $cost_known = ((float)$si['costed_net'] > 0);
+    $margin    = $cost_known ? (max(0.0, (float)$si['costed_net'] - (float)$ret['costed_amount']) - $net_cost) : 0.0;
 
     $final_items[] = [
         'product_id'      => $pid,
@@ -252,6 +267,7 @@ foreach ($sales_items as $si) {
         'returned_amount' => $ret_amt,
         'net_amount'      => $net_amt,
         'margin_amount'   => $margin,
+        'cost_known'      => $cost_known,
     ];
 }
 
@@ -367,6 +383,9 @@ $report_orientation = "landscape";
                         $margin_color = $summary['net_margin_amount'] >= 0 ? 'text-success' : 'text-danger';
                         ?>
                         <h4 class="fw-bold mb-0 <?= $margin_color ?>">Rs. <?= number_format($summary['net_margin_amount'], 2) ?></h4>
+                        <?php if (($summary['uncosted_net'] ?? 0) > 0): ?>
+                        <span class="small text-warning d-block">Excludes Rs. <?= number_format($summary['uncosted_net'], 2) ?> sales with cost missing</span>
+                        <?php endif; ?>
                         <span class="small text-muted fw-semibold">Cost: Rs. <?= number_format($summary['net_cost_amount'], 2) ?></span>
                     </div>
                     <div class="p-3 bg-success-subtle text-success rounded-circle"><i class="fa-solid fa-hand-holding-dollar fs-4"></i></div>
@@ -473,7 +492,7 @@ $report_orientation = "landscape";
                                 <td class="text-center fw-bold text-dark"><?= number_format($row['net_qty']) ?></td>
                                 <td class="text-center text-muted"><?= number_format($row['bonus_qty']) ?></td>
                                 <td class="text-end text-muted">Rs. <?= number_format($row['avg_rate'], 2) ?></td>
-                                <td class="text-end text-muted">Rs. <?= number_format($row['avg_cost'], 2) ?></td>
+                                <td class="text-end text-muted"><?= !empty($row['cost_known']) ? 'Rs. ' . number_format($row['avg_cost'], 2) : '<span class="text-warning">Cost missing</span>' ?></td>
                                 <td class="text-end text-dark">Rs. <?= number_format($row['gross_amount'], 2) ?></td>
                                 <td class="text-end text-warning">Rs. <?= number_format($row['discount_amount'], 2) ?></td>
                                 <td class="text-end">
@@ -484,7 +503,7 @@ $report_orientation = "landscape";
                                     <?php endif; ?>
                                 </td>
                                 <td class="text-end fw-bold text-dark">Rs. <?= number_format($row['net_amount'], 2) ?></td>
-                                <td class="text-end fw-bold <?= $margin_text_color ?>">Rs. <?= number_format($row_margin, 2) ?></td>
+                                <td class="text-end fw-bold <?= $margin_text_color ?>"><?= !empty($row['cost_known']) ? 'Rs. ' . number_format($row_margin, 2) : '<span class="text-warning">Cost missing</span>' ?></td>
                             </tr>
                         <?php endforeach; ?>
                     <?php else: ?>

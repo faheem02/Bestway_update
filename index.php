@@ -137,14 +137,23 @@ if (!empty($pdo) && $db_connected) {
 
         // 6. Cash in Hand
         try {
-            $stmt = $pdo->query("SELECT balance FROM cash_accounts WHERE is_default = 1 LIMIT 1");
-            if ($res = $stmt->fetch()) {
-                $cash_in_hand = (float)$res['balance'];
-            } else {
-                $stmt2 = $pdo->query("SELECT COALESCE(SUM(balance), 0) as total FROM cash_accounts");
-                if ($res2 = $stmt2->fetch()) {
-                    $cash_in_hand = (float)$res2['total'];
+            $has_cash_accounts = (int)$pdo->query("SELECT COUNT(*) FROM cash_accounts")->fetchColumn() > 0;
+            if ($has_cash_accounts) {
+                $stmt = $pdo->query("SELECT balance FROM cash_accounts WHERE is_default = 1 LIMIT 1");
+                if ($res = $stmt->fetch()) {
+                    $cash_in_hand = (float)$res['balance'];
+                } else {
+                    $stmt2 = $pdo->query("SELECT COALESCE(SUM(balance), 0) as total FROM cash_accounts");
+                    if ($res2 = $stmt2->fetch()) {
+                        $cash_in_hand = (float)$res2['total'];
+                    }
                 }
+            } else {
+                // No cash accounts set up: every cash movement is only in the Cash Book, so
+                // Cash in Hand = all cash in (incl. opening) - all cash out. Was always 0 before.
+                $cash_in_hand = (float)$pdo->query("SELECT COALESCE(SUM(CASE
+                        WHEN transaction_type IN ('inflow', 'opening_balance') THEN amount
+                        WHEN transaction_type = 'outflow' THEN -amount ELSE 0 END), 0) FROM cash_book")->fetchColumn();
             }
         } catch (Exception $e) {}
     }

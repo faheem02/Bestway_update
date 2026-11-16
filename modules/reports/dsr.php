@@ -210,7 +210,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 }
 
 // ===== READ DAY DATA =====
-$sql = "SELECT s.id, s.invoice_no, s.invoice_date AS sale_date, s.grand_total, s.paid_amount,
+ensureSaleItemCostColumn($pdo); // batch-wise costing column (sale_items.cost_price)
+$sql ="SELECT s.id, s.invoice_no, s.invoice_date AS sale_date, s.grand_total, s.paid_amount,
                GREATEST(0, (s.grand_total - s.paid_amount)) AS due_amount,
                (CASE 
                    WHEN s.paid_amount >= s.grand_total THEN 'Paid'
@@ -227,7 +228,7 @@ $sql = "SELECT s.id, s.invoice_no, s.invoice_date AS sale_date, s.grand_total, s
                COALESCE(NULLIF(si.total_amount, 0), NULLIF(si.total_price, 0), (si.quantity * si.unit_price), s.grand_total) AS subtotal,
                p.id AS product_id,
                COALESCE(NULLIF(si.item_name, ''), p.name, 'Item') AS product_name,
-               COALESCE(p.purchase_price, 0) AS purchase_price
+               si.cost_price AS batch_cost /* batch-wise cost captured at sale time */
         FROM sales_invoices s
         LEFT JOIN sale_items si ON (si.invoice_id = s.id OR (si.invoice_id = 0 AND si.sale_id = s.id))
         LEFT JOIN customers c ON c.id = s.customer_id
@@ -280,10 +281,16 @@ foreach ($rows as $r) {
         ];
     }
     if (!empty($r['product_name'])) {
-        $cost = (float)$r['purchase_price'] * (float)$r['quantity'];
+        // Batch-wise costing: only lines with a recorded batch cost are costed (never guessed)
         $groups[$sid]['items'][] = $r;
-        $groups[$sid]['total_cost'] += $cost;
-        $groups[$sid]['profit'] += (float)$r['subtotal'] - $cost;
+        if ($r['batch_cost'] !== null && (float)$r['batch_cost'] > 0) {
+            $cost = (float)$r['batch_cost'] * (float)$r['quantity'];
+            $groups[$sid]['total_cost'] += $cost;
+            $groups[$sid]['costed_items'] = ($groups[$sid]['costed_items'] ?? 0) + (float)$r['subtotal'];
+        } else {
+            $groups[$sid]['cost_missing'] = true;
+        }
+        $groups[$sid]['items_sum'] = ($groups[$sid]['items_sum'] ?? 0) + (float)$r['subtotal'];
     }
 }
 
@@ -296,7 +303,7 @@ if (!empty($sale_ids)) {
         $r_stmt = $pdo->query("
             SELECT sr.sale_id,
                    COALESCE(SUM(sri.total_price), 0) AS returned_sales,
-                   COALESCE(SUM(COALESCE(p.purchase_price, 0) * sri.quantity), 0) AS returned_cost
+                   COALESCE(SUM(sri.quantity * COALESCE((SELECT MAX(x.cost_price) FROM sale_items x WHERE x.invoice_id = sr.sale_id AND x.product_id = sri.product_id), 0)), 0) AS returned_cost
             FROM sale_returns sr
             JOIN sale_return_items sri ON sri.return_id = sr.id
             LEFT JOIN products p ON p.id = sri.product_id
@@ -320,7 +327,9 @@ foreach ($groups as $sid => &$grp) {
     $grp['returned_cost']  = $ret_cost;
     $grp['net_sale']       = max(0.0, $grp['grand_total'] - $ret_sales);
     $grp['net_cost']       = max(0.0, $grp['total_cost'] - $ret_cost);
-    $grp['profit']         = $grp['net_sale'] - $grp['net_cost'];
+    // Profit only on the share of the invoice whose batch cost is recorded
+    $costed_share         = ($grp['items_sum'] ?? 0) > 0 ? (($grp['costed_items'] ?? 0) / $grp['items_sum']) : 0;
+    $grp['profit']         = ($grp['net_sale'] * $costed_share) - $grp['net_cost'];
 }
 unset($grp);
 

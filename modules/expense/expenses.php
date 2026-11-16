@@ -13,9 +13,31 @@ if (isset($_GET['delete_id'])) {
             $pdo->beginTransaction();
 
             // Fetch expense details for ledger cleanup
-            $stmt_info = $pdo->prepare("SELECT voucher_no FROM expenses WHERE id = :id");
+            $stmt_info = $pdo->prepare("SELECT * FROM expenses WHERE id = :id");
             $stmt_info->execute(['id' => $del_id]);
-            $v_no = $stmt_info->fetchColumn();
+            $exp_row = $stmt_info->fetch(PDO::FETCH_ASSOC);
+            $v_no = $exp_row['voucher_no'] ?? '';
+
+            // Reverse the money movement this expense recorded (same as expense/index.php delete);
+            // previously the cash book / bank kept the outflow after the expense was deleted.
+            if ($exp_row) {
+                if (strtolower($exp_row['payment_method'] ?? '') === 'bank' && !empty($exp_row['bank_account_id'])) {
+                    $pdo->prepare("UPDATE bank_accounts SET current_balance = current_balance + ? WHERE id = ?")
+                        ->execute([$exp_row['amount'], $exp_row['bank_account_id']]);
+                    $pdo->prepare("DELETE FROM bank_transactions WHERE reference_type = 'expense' AND reference_id = ?")
+                        ->execute([$del_id]);
+                } else {
+                    if (!empty($exp_row['cash_account_id'])) {
+                        $pdo->prepare("UPDATE cash_accounts SET balance = balance + ? WHERE id = ?")
+                            ->execute([$exp_row['amount'], $exp_row['cash_account_id']]);
+                    }
+                    $cb = $pdo->prepare("SELECT DISTINCT daily_id FROM cash_book WHERE reference_type = 'expense' AND reference_id = ?");
+                    $cb->execute([$del_id]);
+                    $cb_days = $cb->fetchAll(PDO::FETCH_COLUMN);
+                    $pdo->prepare("DELETE FROM cash_book WHERE reference_type = 'expense' AND reference_id = ?")->execute([$del_id]);
+                    foreach ($cb_days as $d) { if ($d) recomputeCashDayTotals($pdo, (int)$d); }
+                }
+            }
 
             // Delete ledger entry if exists
             if (!empty($v_no)) {
