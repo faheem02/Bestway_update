@@ -39,7 +39,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
             }
 
             // 1. Fetch items to revert stock
-            $stmt_items = $conn->prepare("SELECT product_id, item_name, quantity FROM sale_items WHERE invoice_id = ?");
+            $stmt_items = $conn->prepare("SELECT product_id, item_name, quantity, batch_id, batch_no FROM sale_items WHERE invoice_id = ?");
             $stmt_items->bind_param("i", $del_id);
             $stmt_items->execute();
             $items_res = $stmt_items->get_result();
@@ -49,13 +49,29 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
             if ($db_connected && $pdo) {
                 $stmt_add_stock = $pdo->prepare("UPDATE products SET current_stock = current_stock + ? WHERE id = ?");
                 $stmt_add_batch = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE product_id = ? ORDER BY id DESC LIMIT 1");
+                // Return the stock to the SAME batch it was sold from (was: always the newest batch)
+                $stmt_add_batch_id = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE id = ? AND product_id = ?");
+                $stmt_add_batch_no = $pdo->prepare("UPDATE product_batches SET current_stock = current_stock + ? WHERE product_id = ? AND batch_no = ? ORDER BY id ASC LIMIT 1");
 
                 foreach ($items as $it) {
                     $pid = intval($it['product_id'] ?? 0);
                     $qty = intval($it['quantity'] ?? 0);
                     if ($pid > 0 && $qty > 0) {
                         $stmt_add_stock->execute([$qty, $pid]);
-                        $stmt_add_batch->execute([$qty, $pid]);
+                        $done = 0;
+                        $bid = intval($it['batch_id'] ?? 0);
+                        $bno = trim((string)($it['batch_no'] ?? ''));
+                        if ($bid > 0) {
+                            $stmt_add_batch_id->execute([$qty, $bid, $pid]);
+                            $done = $stmt_add_batch_id->rowCount();
+                        }
+                        if (!$done && $bno !== '') {
+                            $stmt_add_batch_no->execute([$qty, $pid, $bno]);
+                            $done = $stmt_add_batch_no->rowCount();
+                        }
+                        if (!$done) {
+                            $stmt_add_batch->execute([$qty, $pid]);
+                        }
                     }
                 }
 
@@ -64,9 +80,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'delete' && !empty($_GET['id']
                 if ($paid_amt > 0) {
                     if (!empty($inv['cash_account_id'])) {
                         $pdo->prepare("UPDATE cash_accounts SET balance = GREATEST(0, balance - ?) WHERE id = ?")->execute([$paid_amt, $inv['cash_account_id']]);
-                    } elseif (!empty($inv['bank_account_id'])) {
-                        $pdo->prepare("UPDATE bank_accounts SET current_balance = GREATEST(0, current_balance - ?) WHERE id = ?")->execute([$paid_amt, $inv['bank_account_id']]);
                     }
+                    // The bank balance is undone below together with its bank-book entry
+                    // (a direct balance update here left the bank book entry behind).
+                }
+                // Remove this invoice's cash-book / bank-book entries (they stayed after delete)
+                if (function_exists('reverseBookEntries')) {
+                    reverseBookEntries($pdo, 'sale', $del_id);
                 }
             }
 

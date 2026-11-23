@@ -33,14 +33,22 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_batches' && !empty($_GET[
                     current_stock, 
                     status
                 FROM product_batches
-                WHERE product_id = ?
+                WHERE product_id = ? AND current_stock > 0
                 ORDER BY (current_stock > 0) DESC, expiry_date ASC, id DESC
             ");
             $b_stmt->execute([$pid]);
             $batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
+            // Sold-out batches (stock 0) are hidden. Fall back to purchase_items only for
+            // products that have no batch rows at all (old data), not for sold-out ones.
+            $has_batch_rows = false;
+            if (empty($batches)) {
+                $hb = $pdo->prepare("SELECT 1 FROM product_batches WHERE product_id = ? LIMIT 1");
+                $hb->execute([$pid]);
+                $has_batch_rows = (bool)$hb->fetchColumn();
+            }
 
             // If empty, check purchase_items as fallback
-            if (empty($batches)) {
+            if (empty($batches) && !$has_batch_rows) {
                 $pi_stmt = $pdo->prepare("
                     SELECT 
                         pi.id, 
@@ -185,15 +193,13 @@ if ($db_connected && $pdo) {
                 u.short_name as unit_short,
                 COALESCE(
                     (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
-                    (SELECT pb.batch_no FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
-                    (SELECT pi.batch_no FROM purchase_items pi WHERE pi.product_id = p.id AND pi.batch_no IS NOT NULL AND pi.batch_no != '' ORDER BY pi.id DESC LIMIT 1)
+                    (SELECT pi.batch_no FROM purchase_items pi WHERE pi.product_id = p.id AND NOT EXISTS (SELECT 1 FROM product_batches xb WHERE xb.product_id = p.id) AND pi.batch_no IS NOT NULL AND pi.batch_no != '' ORDER BY pi.id DESC LIMIT 1)
                 ) as batch_no,
                 COALESCE(
                     (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0 ORDER BY pb.expiry_date ASC, pb.id DESC LIMIT 1),
-                    (SELECT pb.expiry_date FROM product_batches pb WHERE pb.product_id = p.id ORDER BY pb.id DESC LIMIT 1),
-                    (SELECT pi.expiry_date FROM purchase_items pi WHERE pi.product_id = p.id AND pi.expiry_date IS NOT NULL ORDER BY pi.id DESC LIMIT 1)
+                    (SELECT pi.expiry_date FROM purchase_items pi WHERE pi.product_id = p.id AND NOT EXISTS (SELECT 1 FROM product_batches xb WHERE xb.product_id = p.id) AND pi.expiry_date IS NOT NULL ORDER BY pi.id DESC LIMIT 1)
                 ) as expiry_date,
-                (SELECT COUNT(*) FROM product_batches pb WHERE pb.product_id = p.id) as batch_count
+                (SELECT COUNT(*) FROM product_batches pb WHERE pb.product_id = p.id AND pb.current_stock > 0) as batch_count
             FROM products p
             LEFT JOIN companies c ON p.company_id = c.id
             LEFT JOIN categories cat ON p.category_id = cat.id

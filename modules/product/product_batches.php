@@ -164,14 +164,22 @@ if ($db_connected && $pdo) {
     try {
         $b_stmt = $pdo->prepare("
             SELECT pb.* FROM product_batches pb
-            WHERE pb.product_id = ?
+            WHERE pb.product_id = ? AND pb.current_stock > 0
             ORDER BY pb.expiry_date ASC, pb.id ASC
         ");
         $b_stmt->execute([$product_id]);
         $batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
+        // Sold-out batches (stock 0) are hidden; the fallback below is only for products
+        // that have no batch rows at all, not for products whose batches are sold out.
+        $has_batch_rows = false;
+        if (empty($batches)) {
+            $hb = $pdo->prepare("SELECT 1 FROM product_batches WHERE product_id = ? LIMIT 1");
+            $hb->execute([$product_id]);
+            $has_batch_rows = (bool)$hb->fetchColumn();
+        }
 
         // If no rows in product_batches yet, fallback to opening stock / product master
-        if (empty($batches)) {
+        if (empty($batches) && !$has_batch_rows) {
             $default_batch = !empty($product['batch_no']) ? $product['batch_no'] : 'DEFAULT';
             $default_exp = (!empty($product['expiry_date']) && $product['expiry_date'] !== '0000-00-00') ? $product['expiry_date'] : date('Y-m-d', strtotime('+2 years'));
             $batches = [

@@ -407,6 +407,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             // STEP 1: VALIDATE PRODUCTS & STOCK FROM SYSTEM (Zero-trust, Pcs based)
             $validated_items = [];
             $requested_by_pid = []; // total qty asked per product across ALL rows (same product can be on several rows)
+            $requested_by_batch = []; // total qty asked per batch across ALL rows
             $subtotal = 0;
             $total_discount_cut = 0;
 
@@ -420,6 +421,11 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $b_no  = trim($batch_nos[$i] ?? '');
                 $b_id  = intval($batch_ids[$i] ?? 0);
                 $b_exp = !empty($expiries[$i]) ? trim($expiries[$i]) : null;
+
+                // The blank row that opens automatically after selecting a product is ignored
+                if ($pid <= 0 && $name === '') {
+                    continue;
+                }
 
                 if ($pid <= 0) {
                     throw new Exception("Row #" . ($i + 1) . ": Please search and select a registered medicine from the system.");
@@ -457,6 +463,29 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     throw new Exception("Error: Available stock for '{$p_name}' is only {$available_stock} Pcs, but entered quantity is {$qty}.");
                 }
 
+                // Check 2b: the selected BATCH must have enough stock too (a sale must not take
+                // more from a batch than it holds; the product total alone is not enough).
+                $batch_row = null;
+                if ($b_id > 0) {
+                    $stmt_bchk = $pdo->prepare("SELECT id, batch_no, current_stock FROM product_batches WHERE id = ? AND product_id = ? LIMIT 1");
+                    $stmt_bchk->execute([$b_id, $pid]);
+                    $batch_row = $stmt_bchk->fetch(PDO::FETCH_ASSOC);
+                } elseif ($b_no !== '' && strtoupper($b_no) !== 'DEFAULT') {
+                    $stmt_bchk = $pdo->prepare("SELECT id, batch_no, current_stock FROM product_batches WHERE product_id = ? AND batch_no = ? LIMIT 1");
+                    $stmt_bchk->execute([$pid, $b_no]);
+                    $batch_row = $stmt_bchk->fetch(PDO::FETCH_ASSOC);
+                }
+                if ($batch_row) {
+                    $bkey = (int)$batch_row['id'];
+                    $requested_by_batch[$bkey] = ($requested_by_batch[$bkey] ?? 0) + $qty;
+                    $batch_stock = (int)$batch_row['current_stock'];
+                    if ($requested_by_batch[$bkey] > $batch_stock) {
+                        throw new Exception("Error: Batch '{$batch_row['batch_no']}' of '{$p_name}' has only {$batch_stock} Pcs, but {$requested_by_batch[$bkey]} Pcs entered on this invoice. Please reduce the quantity or add another row for the remaining quantity from a different batch.");
+                    }
+                } elseif ($b_id > 0) {
+                    throw new Exception("Row #" . ($i + 1) . ": Selected batch was not found for '{$p_name}'. Please select the batch again.");
+                }
+
                 // Check 3: Rate handling - honor the entered/edited rate from user
                 if ($tp <= 0) {
                     $tp = floatval($prod_row['trade_price'] ?? 0);
@@ -487,7 +516,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 ];
             }
 
-            if (empty($item_names) || !is_array($item_names)) {
+            if (empty($validated_items)) {
                 throw new Exception("Please include at least one product item.");
             }
 
@@ -2282,6 +2311,15 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
         if (batchIdInput) batchIdInput.value = batchId;
         if (batchExpInput) batchExpInput.value = expiry;
 
+        // The quantity limit is the stock of the SELECTED batch (not the product total)
+        const stockEl = document.getElementById('stockAvailable_' + rowId);
+        if (stockEl) stockEl.value = batchStock;
+        const qtyEl = document.getElementById('qty_' + rowId);
+        if (qtyEl && (parseInt(qtyEl.value) || 0) > batchStock && batchStock > 0) {
+            alert("⚠️ Is batch (" + opt.value + ") mein sirf " + batchStock + " Pcs hain.\nQuantity " + batchStock + " kar di gayi hai. Baqi quantity ke liye doosre batch ki nayi row add karein.");
+            qtyEl.value = batchStock;
+        }
+
         if (batchSub) {
             batchSub.classList.remove('d-none');
             let badgeClass = batchStock > 0 ? 'badge-success' : 'badge-danger';
@@ -2347,7 +2385,9 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 return;
             }
             if (enteredQty > stockVal) {
-                alert("⚠️ Error: Only " + stockVal + " Pcs available in stock for '" + prodName + "'!\nEntered quantity has been set to " + stockVal + ".");
+                const bSel = document.getElementById('batchSelect_' + rowId);
+                const bName = (bSel && bSel.value) ? bSel.value : '';
+                alert("⚠️ Error: Batch " + bName + " mein '" + prodName + "' ke sirf " + stockVal + " Pcs hain!\nQuantity " + stockVal + " kar di gayi hai. Baqi quantity ke liye doosre batch ki nayi row add karein.");
                 qtyInput.value = stockVal;
             } else if (enteredQty < 1) {
                 qtyInput.value = 1;
@@ -2575,6 +2615,19 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                 return false;
             }
 
+            // Remove the empty row(s) that open automatically after a product is chosen,
+            // so their required fields do not block saving (keep at least one row).
+            if (itemsBody) {
+                const allRows = Array.from(itemsBody.querySelectorAll('.sale-item-row'));
+                const isBlank = r => !r.querySelector('.product-id-input').value &&
+                                     !(r.querySelector('.med-search-input').value || '').trim();
+                const filled = allRows.filter(r => !isBlank(r));
+                if (filled.length > 0) {
+                    allRows.filter(isBlank).forEach(r => r.remove());
+                    updateRowIndices();
+                }
+            }
+
             const rows = itemsBody ? itemsBody.querySelectorAll('.sale-item-row') : [];
             if (!rows || rows.length === 0) {
                 alert('Please add at least one product.');
@@ -2600,6 +2653,27 @@ $show_sale_form = (!empty($preselected_customer) || isset($_GET['direct']) || $_
                     errorMsg = `Row #${idx + 1}: Product '${pName}' has only ${stock} in stock, but entered quantity is ${qty}!`;
                 }
             });
+
+            // Same batch on several rows: their total must not exceed that batch's stock
+            if (!hasError) {
+                const perBatch = {};
+                rows.forEach(row => {
+                    const bSel = row.querySelector('.batch-select');
+                    const opt = bSel && bSel.selectedIndex >= 0 ? bSel.options[bSel.selectedIndex] : null;
+                    const bId = opt ? parseInt(opt.dataset.batchId || 0) : 0;
+                    if (!bId) return;
+                    const qty = parseInt(row.querySelector('.qty-input').value) || 0;
+                    if (!perBatch[bId]) perBatch[bId] = { qty: 0, stock: parseInt(opt.dataset.stock || 0), name: opt.value,
+                                                          product: row.querySelector('.item-name-input').value || 'Medicine' };
+                    perBatch[bId].qty += qty;
+                });
+                Object.values(perBatch).forEach(b => {
+                    if (!hasError && b.qty > b.stock) {
+                        hasError = true;
+                        errorMsg = `Batch ${b.name} (${b.product}) mein sirf ${b.stock} Pcs hain, lekin invoice par is batch se ${b.qty} Pcs likhe hain.`;
+                    }
+                });
+            }
 
             if (hasError) {
                 alert('⚠️ ' + errorMsg);

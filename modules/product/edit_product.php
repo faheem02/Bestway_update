@@ -41,7 +41,7 @@ if (!$prod) {
 $existing_batches = [];
 if ($db_connected && $pdo) {
     try {
-        $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id ASC");
+        $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY id ASC");
         $b_stmt->execute([$product_id]);
         $existing_batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {}
@@ -129,6 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                         $bqty  = intval($b_stocks[$i] ?? 0);
 
                         if (empty($bno) && $bqty <= 0 && $brate <= 0) continue;
+                        // A new row with no stock would only create an empty (sold-out) batch
+                        if ($bid <= 0 && $bqty <= 0) continue;
 
                         if (empty($bno)) {
                             $bno = "BAT-" . date('ymd') . "-" . ($i + 1);
@@ -173,7 +175,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_product'])) {
                 $prod = $stmt->fetch();
 
                 // Re-fetch all batches
-                $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? ORDER BY id ASC");
+                $b_stmt = $pdo->prepare("SELECT * FROM product_batches WHERE product_id = ? AND current_stock > 0 ORDER BY id ASC");
                 $b_stmt->execute([$product_id]);
                 $existing_batches = $b_stmt->fetchAll(PDO::FETCH_ASSOC);
 

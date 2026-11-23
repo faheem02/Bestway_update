@@ -720,6 +720,27 @@ if ($db_connected && $pdo) {
     .items-table-wrapper { overflow: visible !important; }
     .table-responsive { overflow: visible !important; }
 
+    /* Items table: horizontal scroll inside the card instead of spilling out on the right */
+    .table-responsive.items-scroll {
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        -webkit-overflow-scrolling: touch;
+    }
+    .items-scroll .items-table { min-width: 1500px; }
+    /* Small number boxes: less side padding so the typed digits stay visible */
+    .items-table input[type=number].form-control {
+        padding-left: 4px;
+        padding-right: 4px;
+    }
+    .items-table .qty-col   { min-width: 95px;  width: 95px; }
+    .items-table .bonus-col { min-width: 85px;  width: 85px; }
+    .items-table .tqty-col  { min-width: 85px;  width: 85px; }
+    .items-table .disc-col  { min-width: 90px;  width: 90px; }
+    .items-table .gst-col   { min-width: 90px;  width: 90px; }
+    /* Medicine search list is placed with position:fixed (see positionMedDropdown) so the
+       scroll container does not cut it off */
+    .med-dropdown.med-dropdown-fixed { position: fixed; right: auto; margin-top: 0; z-index: 1080; }
+
     .search-dropdown-menu {
         position: absolute;
         top: 100%;
@@ -862,19 +883,19 @@ if ($db_connected && $pdo) {
         </div>
 
         <div class="card-body p-0">
-            <div class="table-responsive">
+            <div class="table-responsive items-scroll" id="itemsScroll">
                 <table class="table table-bordered table-hover mb-0 align-middle items-table" id="itemsTable">
                     <thead>
                         <tr>
                             <th style="min-width: 220px;">Medicine / Product Name</th>
                             <th style="min-width: 175px; width: 185px;" class="text-center">Batch #</th>
                             <th style="width: 130px;" class="text-center">Expiry Date</th>
-                            <th style="width: 75px;" class="text-center">Qty</th>
-                            <th style="width: 70px;" class="text-center">Bonus</th>
-                            <th style="width: 70px;" class="text-center">Total Qty</th>
+                            <th class="text-center qty-col">Qty</th>
+                            <th class="text-center bonus-col">Bonus</th>
+                            <th class="text-center tqty-col">Total Qty</th>
                             <th style="width: 105px;" class="text-right">TP Rate (Rs.)</th>
-                            <th style="width: 80px;" class="text-center text-success">TP Disc %</th>
-                            <th style="width: 75px;" class="text-center">GST %</th>
+                            <th class="text-center text-success disc-col">TP Disc %</th>
+                            <th class="text-center gst-col">GST %</th>
                             <th style="width: 110px;" class="text-right">Total (Rs.)</th>
                             <th style="width: 95px;" class="text-center text-success">Total Benefit %</th>
                             <th style="width: 115px;" class="text-center text-primary">Sale Disc %</th>
@@ -1299,6 +1320,46 @@ function onMedSearchInput(rowId) {
     searchProducts(rowId, q);
 }
 
+// The items table scrolls sideways, so its dropdowns are shown with position:fixed
+// (anchored to the search box) to keep them from being cut off by the scroll box.
+function positionMedDropdown(rowId) {
+    const dd = document.getElementById('medDropdown_' + rowId);
+    const input = document.getElementById('medSearch_' + rowId);
+    if (!dd || !input || dd.classList.contains('d-none')) return;
+    const group = input.closest('.input-group') || input;
+    const r = group.getBoundingClientRect();
+    const width = Math.max(r.width, 420);
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+    const spaceBelow = window.innerHeight - r.bottom - 12;
+    dd.classList.add('med-dropdown-fixed');
+    dd.style.left = left + 'px';
+    dd.style.width = width + 'px';
+    if (spaceBelow < 200 && r.top > spaceBelow) {
+        // not enough room below: open upwards
+        dd.style.top = 'auto';
+        dd.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+        dd.style.maxHeight = Math.min(280, r.top - 12) + 'px';
+    } else {
+        dd.style.bottom = 'auto';
+        dd.style.top = (r.bottom + 4) + 'px';
+        dd.style.maxHeight = Math.min(280, Math.max(150, spaceBelow)) + 'px';
+    }
+}
+function repositionOpenMedDropdowns() {
+    document.querySelectorAll('.med-dropdown:not(.d-none)').forEach(dd => {
+        positionMedDropdown(dd.id.replace('medDropdown_', ''));
+    });
+}
+window.addEventListener('scroll', repositionOpenMedDropdowns, true);
+window.addEventListener('resize', repositionOpenMedDropdowns);
+// Batch dropdown (Bootstrap/Popper): fixed positioning so the scroll box does not clip it
+// (bootstrap.js is loaded in the footer, after this script, so set it once the page is ready)
+document.addEventListener('DOMContentLoaded', function () {
+    if (window.jQuery && jQuery.fn.dropdown && jQuery.fn.dropdown.Constructor) {
+        jQuery.fn.dropdown.Constructor.Default.popperConfig = { positionFixed: true };
+    }
+});
+
 function searchProducts(rowId, query) {
     const dd = document.getElementById('medDropdown_' + rowId);
     if (!dd) return;
@@ -1318,6 +1379,7 @@ function searchProducts(rowId, query) {
 
     renderProductList(rowId, localMatches, qTrim);
     dd.classList.remove('d-none');
+    positionMedDropdown(rowId);
 
     // Live AJAX search to Database
     clearTimeout(medSearchTimers[rowId]);
@@ -1937,18 +1999,18 @@ function addNewItemRow(prefilledData = null) {
         </td>
 
         <!-- 2. Quantity (Pcs) -->
-        <td style="width: 75px;">
+        <td class="qty-col">
             <input type="number" min="1" name="items[${rowCounter}][quantity]" id="qty_${rowCounter}" class="form-control text-center font-weight-bold" placeholder="1" value="" onfocus="this.select()" required oninput="calculateRowTotal(${rowCounter})">
         </td>
 
         <!-- 3. Bonus Quantity (Pcs) -->
-        <td style="width: 70px;">
+        <td class="bonus-col">
             <input type="number" min="0" name="items[${rowCounter}][bonus_quantity]" id="bonusQty_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0" value="" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <div id="bonusValDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 3.5 Total Quantity (Pcs) -->
-        <td style="width: 70px;">
+        <td class="tqty-col">
             <input type="number" readonly id="totalQtyDisp_${rowCounter}" class="form-control text-center font-weight-bold col-all-total" placeholder="0" value="">
         </td>
 
@@ -1958,14 +2020,14 @@ function addNewItemRow(prefilledData = null) {
         </td>
 
         <!-- 5. TP Discount % -->
-        <td style="width: 80px;">
+        <td class="disc-col">
             <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][discount_percent]" id="discPct_${rowCounter}" class="form-control text-center font-weight-bold text-success" placeholder="0.00" value="${discPct}" title="TP Discount % (Supplier Disc)" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][discount_amount]" id="discAmt_${rowCounter}" value="0.00">
             <div id="discAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
         </td>
 
         <!-- 5.5 GST % -->
-        <td style="width: 75px;">
+        <td class="gst-col">
             <input type="number" step="0.01" min="0" max="100" name="items[${rowCounter}][tax_percent]" id="gstPct_${rowCounter}" class="form-control text-center font-weight-bold text-primary" placeholder="0.00" value="${gstPct}" onfocus="this.select()" oninput="calculateRowTotal(${rowCounter})">
             <input type="hidden" name="items[${rowCounter}][tax_amount]" id="taxAmt_${rowCounter}" value="0.00">
             <div id="taxAmtDisp_${rowCounter}" class="text-center mt-1" style="font-size: 0.68rem; line-height: 1.1; white-space: nowrap;"></div>
